@@ -9,10 +9,26 @@ ensure_dir <- function(path) {
 # ---- Simple sourcing (assuming working directory is app directory) ----
 app_dir <- getwd()
 
-try(source(file.path(app_dir, "utils.R"),  local = TRUE), silent = TRUE)
+source(file.path(app_dir, "utils.R"), local = TRUE)
 try(source(file.path(app_dir, "renderSSplot.R"), local = TRUE), silent = TRUE)
 try(source(file.path(app_dir, "sankey.R"),       local = TRUE), silent = TRUE)
-source("appstable.R", local = TRUE)     # <-- 加這行：恢復正確 render_ssplot_png
+if (file.exists(file.path(app_dir, "appstable.R"))) {
+  try(source(file.path(app_dir, "appstable.R"), local = TRUE), silent = TRUE)
+}
+
+# Fallback in case utils.R did not fully load or helper is absent
+if (!exists("read_any_table", mode = "function")) {
+  read_any_table <- function(path) {
+    ext <- tolower(tools::file_ext(path))
+    if (ext %in% c("csv", "txt", "tsv")) {
+      out <- tryCatch(utils::read.csv(path, stringsAsFactors = FALSE, check.names = FALSE), error = function(e) NULL)
+      if (!is.null(out)) return(out)
+      out <- tryCatch(utils::read.delim(path, stringsAsFactors = FALSE, check.names = FALSE), error = function(e) NULL)
+      if (!is.null(out)) return(out)
+    }
+    stop("No available reader for file: ", basename(path))
+  }
+}
 
 options(stringsAsFactors = FALSE)
 # ---- Guard: avoid 'cannot change locked binding for data' ----
@@ -25,10 +41,13 @@ options(repos = c(CRAN="https://cloud.r-project.org"))
 pkgs <- c("shiny","dplyr","rmarkdown","igraph","ggplot2","ggrepel","grid","readr")
 miss <- pkgs[!vapply(pkgs, requireNamespace, quietly=TRUE, FUN.VALUE=logical(1))]
 if (length(miss)) {
-  stop("Missing required packages: ", paste(miss, collapse=", "),
-       "
+  stop(
+    "Missing required packages: ", paste(miss, collapse = ", "),
+    "
 Please install them first, e.g.: install.packages(c(",
-       paste(sprintf('"%s"', miss), collapse=", "), "))")
+    paste(sprintf('\"%s\"', miss), collapse = ", "),
+    "))"
+  )
 }
 suppressPackageStartupMessages({
   library(shiny)
@@ -139,7 +158,7 @@ render_kano_png <- function(out_png, nodes, data, xcol = "value2", ycol = "value
   )
   diag_line_63_5$y <- slope_63_5 * (diag_line_63_5$x - mean_x) + mean_y
 
-  visual_ratio <- 1 / 1.5
+  visual_ratio <- if (identical(xcol, "value2") && identical(ycol, "value")) 0.32 else (1 / 1.5)
   circle_data <- NULL
   if (isTRUE(add_circle)) {
     x_lower <- function(tt) ( tt * spread_x - spread_x/2 + mean_x )
@@ -181,7 +200,18 @@ render_kano_png <- function(out_png, nodes, data, xcol = "value2", ycol = "value
       color = "gray60", linewidth = 0.8, alpha = 0.7
     ) +
     geom_point(aes(size = size_plot, fill = color), color = "black", shape = 21, alpha = 0.9) +
-    geom_text_repel(aes(label = name), size = 3.5, max.overlaps = 100) +
+    geom_text_repel(
+      aes(label = name),
+      size = 3.2,
+      max.overlaps = Inf,
+      box.padding = 0.45,
+      point.padding = 0.25,
+      force = 1.2,
+      force_pull = 0.2,
+      min.segment.length = 0,
+      segment.alpha = 0.65,
+      seed = 123
+    ) +
     scale_fill_identity() +
     scale_size(range = c(3, 12)) +
     geom_vline(xintercept = mean_x, linetype = "dashed", color = "red") +
@@ -198,12 +228,13 @@ render_kano_png <- function(out_png, nodes, data, xcol = "value2", ycol = "value
   p_kano <- p_kano +
     coord_fixed(ratio = visual_ratio, clip = "off") +
     scale_x_continuous(limits = c(min_x - 3 * expand_x, max_x + 3 * expand_x)) +
-    scale_y_continuous(limits = c(min_y - 3 * expand_y, max_y + 3 * expand_y)) +
+    scale_y_continuous(limits = c(min_y - 8 * expand_y, max_y + 22 * expand_y),
+                     expand = ggplot2::expansion(mult = c(0.02, 0.06))) +
     labs(title = title, x = xlab, y = ylab, size = "Dominance") +
     theme_minimal(base_family = "Microsoft JhengHei") +
     theme(plot.title = element_text(size = 16, face = "bold", hjust = 0.5), legend.position = "none")
 
-  grDevices::png(out_png, width = 1200, height = 900, res = 130)
+  grDevices::png(out_png, width = 1200, height = 1200, res = 130)
   on.exit({ grDevices::dev.off() }, add = TRUE)
   print(p_kano)
   invisible(out_png)
@@ -259,19 +290,67 @@ if (!isTRUE(flca_loaded)) {
 
 options(FLCA_SHINY_NO_SIDE_EFFECTS = TRUE)
 source("renderSSplot.R", local = TRUE)  # provides render_panel()
+.extract_raw_query_param <- function(search, key) {
+  search <- as.character(search %||% "")
+  if (!nzchar(search)) return(NA_character_)
+  pat <- paste0("(?:^|[?&])", key, "=(.*)$")
+  m <- regexec(pat, search, perl = TRUE)
+  mm <- regmatches(search, m)[[1]]
+  if (length(mm) < 2) return(NA_character_)
+  val <- mm[2]
+  val <- sub("^\\?", "", val)
+  if (key == "pubmed_url") {
+    val <- sub("&autorun=.*$", "", val, perl = TRUE)
+  } else if (key == "csv_url") {
+    val <- sub("&autorun=.*$", "", val, perl = TRUE)
+    val <- sub("&pubmed_url=.*$", "", val, perl = TRUE)
+  }
+  utils::URLdecode(val)
+}
+
+.download_remote_to_file <- function(remote_url, destfile) {
+  remote_url <- as.character(remote_url %||% "")
+  if (!nzchar(remote_url)) return(FALSE)
+  ok <- tryCatch({
+    utils::download.file(remote_url, destfile = destfile, mode = "wb", quiet = TRUE, method = "libcurl")
+    file.exists(destfile) && isTRUE(file.info(destfile)$size > 0)
+  }, error = function(e) FALSE)
+  if (ok) return(TRUE)
+  ok <- tryCatch({
+    con <- url(remote_url, open = "rb")
+    on.exit(try(close(con), silent = TRUE), add = TRUE)
+    buf <- readBin(con, what = "raw", n = 5e7)
+    writeBin(buf, destfile)
+    file.exists(destfile) && isTRUE(file.info(destfile)$size > 0)
+  }, error = function(e) FALSE)
+  ok
+}
+
 ui <- fluidPage(
-  titlePanel("FLCA Top20 Report (PNG-first, shinyapps.io ready)"),
+  titlePanel("FLCA Top20 Report (PubMed, WoS, and coword data)"),
   sidebarLayout(
     sidebarPanel(
       fileInput("file", "Upload data (2 columns: Leader,Follower OR 3 columns: Leader,Follower,WCD)",
                 accept = c(".csv", ".txt", ".tsv")),
+      textInput("pubmed_url", "PubMed search hyperlink", value = "",
+                placeholder = "https://pubmed.ncbi.nlm.nih.gov/?term=Tsair-Wei+Chien%5BAuthor%5D&sort=date"),
       checkboxInput("use_demo", "Use demo (country.csv) if no upload", value = FALSE),
       numericInput("topn", "Top N (sampling after FLCA)", value = 20, min = 10, max = 50),
       numericInput("per_cluster", "Major sampling: per cluster", value = 4, min = 1, max = 10),
       actionButton("run", "Generate HTML report", class = "btn-primary"),
       br(), br(),
       uiOutput("report_link"),
-      downloadButton("dl_report", "Download report.html")
+      downloadButton("dl_report", "Download report.html"),
+      br(), br(),
+      tags$hr(),
+      h5("Example data"),
+      downloadButton("dl_demo_example", "1. demo"),
+      br(),
+      downloadButton("dl_pubmedsummary_example", "2. pubmedsummary"),
+      br(),
+      downloadButton("dl_reference_example", "3. AMA reference"),
+      br(),
+      downloadButton("dl_wos_example", "4. WoS coword")
     ),
     mainPanel(
       tabsetPanel(
@@ -283,15 +362,20 @@ ui <- fluidPage(
           tags$details(open = TRUE, style="border:1px solid #ddd;border-radius:12px;margin:12px 0;overflow:hidden;",
             tags$summary(style="padding:10px 14px;cursor:pointer;background:#f6f6f6;font-weight:700;",
                          "ReadMe (How to use this App)"),
+            tags$div(style="padding:8px 14px 0 14px;color:#8B0000;font-weight:700;", "Note: AMA-reference inputs keep all authors plus journal; PubMed URL and WoS one-column author inputs keep only the first and last authors plus journal."),
             tags$div(style="padding:12px 14px;line-height:1.6;",
               tags$ol(
-                tags$li(tags$b("Upload"), " a CSV/TXT/TSV with 2 columns (Leader, Follower) or 3 columns (Leader, Follower, WCD)."),
+                tags$li(tags$b("Upload"), " a CSV/TXT/TSV with 2 columns (Leader, Follower), 3 columns (Leader, Follower, WCD), multi-column records, PubMed summary text, AMA references, or WoS one-column ';' data."),
+                tags$li(tags$b("PubMed URL"), " paste a PubMed search hyperlink to fetch all MEDLINE summary records automatically."),
+                tags$li(tags$b("Example link: CSV"), tags$a(" https://smilechien.shinyapps.io/zssplotauthor3/?autorun=1&csv_url=https://raw.githubusercontent.com/smilechien/raschonline/main/DrKan.csv", href = "https://smilechien.shinyapps.io/zssplotauthor3/?autorun=1&csv_url=https://raw.githubusercontent.com/smilechien/raschonline/main/DrKan.csv", target = "_blank")),
+                tags$li(tags$b("Example link: PubMed"), tags$a(" https://smilechien.shinyapps.io/zssplotauthor3/?autorun=1&pubmed_url=https://pubmed.ncbi.nlm.nih.gov/?term=Tsair-Wei+Chien%5BAuthor%5D&sort=date", href = "https://smilechien.shinyapps.io/zssplotauthor3/?autorun=1&pubmed_url=https://pubmed.ncbi.nlm.nih.gov/?term=Tsair-Wei+Chien%5BAuthor%5D&sort=date", target = "_blank")),
                 tags$li(tags$b("Run"), " click 'Generate HTML report' to compute FLCA, major sampling, and figures."),
                 tags$li(tags$b("View"), " figures in the Figures tab (Network, SSplot, Kano1, Kano2, PCA, Sankey)."),
                 tags$li(tags$b("Download"), " tables/figures from the Downloads tab (includes demo data for learning)."),
                 tags$li(tags$b("Report"), " open the self-contained HTML report, or download report.html.")
               ),
               tags$ul(
+                tags$li(tags$strong("Author rule for visual analysis:"), " AMA-reference inputs keep all authors and the journal. PubMed URL and WoS author inputs keep only the first and last authors and the journal."),
                 tags$li("Top N controls how many nodes are kept after FLCA (default 20)."),
                 tags$li("Major sampling per cluster controls balance across clusters."),
                 tags$li("If you only want to learn the format, download the demo data first.")
@@ -299,8 +383,8 @@ ui <- fluidPage(
             )
           ),
           tags$ul(
-            tags$li("Accepted formats: CSV / TXT / TSV"),
-            tags$li("Columns: (Leader, follower) or (Leader, follower, WCD)"),
+            tags$li("Accepted formats: CSV / TXT / TSV or a PubMed search hyperlink"),
+            tags$li("Input types: 2/3-column coword, multi-column records, PubMed summary, AMA references, WoS one-column ';' data"),
             tags$li("Output: self-contained HTML report + PNG figures")
           )
         ),
@@ -373,8 +457,77 @@ server <- function(input, output, session) {
     top20_nodes   = NULL,
     top20_edges   = NULL,
     sankey_url    = NULL,
-    sankey_code   = NULL
+    sankey_code   = NULL,
+    remote_csv_path = NULL,
+    pubmed_summary_path = NULL,
+    autorun_fired = FALSE
   )
+  .autorun_query_values <- reactive({
+    search <- session$clientData$url_search %||% ""
+    qs <- tryCatch(shiny::parseQueryString(search), error = function(e) list())
+    raw_csv <- .extract_raw_query_param(search, "csv_url")
+    if (is.na(raw_csv) || !nzchar(raw_csv)) raw_csv <- as.character(qs$csv_url %||% "")
+    raw_pubmed <- .extract_raw_query_param(search, "pubmed_url")
+    if (is.na(raw_pubmed) || !nzchar(raw_pubmed)) raw_pubmed <- as.character(qs$pubmed_url %||% "")
+    list(
+      autorun = !is.null(qs$autorun) && as.character(qs$autorun)[1] %in% c("1", "true", "TRUE", "yes"),
+      csv_url = trimws(as.character(raw_csv %||% "")),
+      pubmed_url = trimws(as.character(raw_pubmed %||% ""))
+    )
+  })
+  
+  observe({
+    qs <- tryCatch(shiny::parseQueryString(session$clientData$url_search %||% ""), error = function(e) list())
+    raw_csv <- .extract_raw_query_param(session$clientData$url_search %||% "", "csv_url")
+    if (is.na(raw_csv) || !nzchar(raw_csv)) raw_csv <- as.character(qs$csv_url %||% "")
+    if (is.na(raw_csv) || !nzchar(raw_csv)) return()
+    if (!is.null(rv$remote_csv_path) && nzchar(rv$remote_csv_path)) return()
+    tmp_ext <- tolower(tools::file_ext(raw_csv))
+    if (!nzchar(tmp_ext)) tmp_ext <- "csv"
+    tmp <- tempfile(fileext = paste0(".", tmp_ext))
+    ok <- .download_remote_to_file(raw_csv, tmp)
+    if (!ok) {
+      showNotification("Failed to download csv_url data.", type = "error", duration = NULL)
+      return()
+    }
+    rv$remote_csv_path <- tmp
+    showNotification(paste0("Loaded remote data from csv_url: ", basename(tmp)), type = "message")
+    if (!is.null(qs$autorun) && as.character(qs$autorun)[1] %in% c("1", "true", "TRUE", "yes")) {
+      isolate({
+        shiny::updateCheckboxInput(session, "use_demo", value = FALSE)
+      })
+      shiny::updateActionButton(session, "run", label = "Generate HTML report")
+      later::later(function() {
+        try(session$sendInputMessage("run", list(value = as.numeric(Sys.time()))), silent = TRUE)
+      }, delay = 0.6)
+    }
+  })
+
+
+
+  observe({
+    req(session$clientData$url_search)
+    qs <- tryCatch(shiny::parseQueryString(session$clientData$url_search %||% ""), error = function(e) list())
+    raw_pubmed <- .extract_raw_query_param(session$clientData$url_search %||% "", "pubmed_url")
+    if (is.na(raw_pubmed) || !nzchar(raw_pubmed)) raw_pubmed <- as.character(qs$pubmed_url %||% "")
+    if (!is.na(raw_pubmed) && nzchar(raw_pubmed) && !identical(input$pubmed_url, raw_pubmed)) {
+      shiny::updateTextInput(session, "pubmed_url", value = raw_pubmed)
+    }
+  })
+
+
+  observe({
+    qv <- .autorun_query_values()
+    if (!isTRUE(qv$autorun) || isTRUE(rv$autorun_fired)) return()
+    if (!nzchar(qv$pubmed_url) && !nzchar(qv$csv_url)) return()
+    rv$autorun_fired <- TRUE
+    isolate({ shiny::updateCheckboxInput(session, "use_demo", value = FALSE) })
+    shiny::updateActionButton(session, "run", label = "Generate HTML report")
+    later::later(function() {
+      try(session$sendInputMessage("run", list(value = as.numeric(Sys.time()))), silent = TRUE)
+    }, delay = 1.0)
+  })
+
   observeEvent(input$run, {
     
             # ---- Scalar-safe helper (prevents knitr 'text length zero') ----
@@ -389,17 +542,34 @@ server <- function(input, output, session) {
     withProgress(message = "Generating report...", value = 0, {
       tryCatch({
         incProgress(0.1, detail = "Loading data")
-        # Prefer uploaded file if provided; fallback to demo only if no upload
+        # Prefer uploaded file if provided; otherwise fall back to URL params from the current page.
+        qv <- .autorun_query_values()
+        pubmed_url_now <- trimws(as.character(input$pubmed_url %||% ""))
+        if (!nzchar(pubmed_url_now) && nzchar(qv$pubmed_url)) pubmed_url_now <- qv$pubmed_url
+        remote_csv_now <- rv$remote_csv_path
+        if ((is.null(remote_csv_now) || !nzchar(remote_csv_now) || !file.exists(remote_csv_now)) && nzchar(qv$csv_url)) {
+          tmp_ext <- tolower(tools::file_ext(qv$csv_url)); if (!nzchar(tmp_ext)) tmp_ext <- "csv"
+          tmp <- tempfile(fileext = paste0(".", tmp_ext))
+          ok <- .download_remote_to_file(qv$csv_url, tmp)
+          if (ok && file.exists(tmp)) {
+            rv$remote_csv_path <- tmp
+            remote_csv_now <- tmp
+          }
+        }
         if (!is.null(input$file) && !is.na(input$file$datapath) && nzchar(input$file$datapath)) {
-          # Use the uploaded file
-          dat <- read_any_table(input$file$datapath)
+          dat <- smart_prepare_uploaded_data(read_any_table(input$file$datapath), input$file$datapath)
+        } else if (nzchar(pubmed_url_now)) {
+          pub_df <- fetch_pubmed_summary_df(pubmed_url_now)
+          dat <- smart_prepare_uploaded_data(pub_df, "pubmedsummary_from_url.txt")
+          rv$pubmed_summary_path <- save_pubmed_summary_text(pub_df)
+        } else if (!is.null(remote_csv_now) && nzchar(remote_csv_now) && file.exists(remote_csv_now)) {
+          dat <- smart_prepare_uploaded_data(read_any_table(remote_csv_now), remote_csv_now)
         } else if (isTRUE(input$use_demo)) {
-          # Use demo file from app directory
           demo_path <- file.path(app_dir, "demo", "demo_edges.csv")
           if (!file.exists(demo_path)) stop("Demo data not found: ", demo_path)
-          dat <- read_any_table(demo_path)
+          dat <- smart_prepare_uploaded_data(read_any_table(demo_path), demo_path)
         } else {
-          stop("No data uploaded. Please upload a CSV file or select 'Use demo'.")
+          stop("No data uploaded. Please upload a file, paste a PubMed hyperlink, provide ?csv_url=..., or select 'Use demo'.")
         }
         # ---- Minimal numeric coercion (ensure third column is numeric or default to 1) ----
         if (ncol(dat) >= 3) {
@@ -712,6 +882,46 @@ output$dl_demo_data <- downloadHandler(
     demo_path <- file.path(app_dir, "demo", "demo_edges.csv")
     if (!file.exists(demo_path)) stop("Demo data not found: ", demo_path)
     file.copy(demo_path, file, overwrite = TRUE)
+  }
+)
+
+output$dl_demo_example <- downloadHandler(
+  filename = function() "demo_edges.csv",
+  content = function(file) {
+    src <- file.path(app_dir, "demo", "demo_edges.csv")
+    if (!file.exists(src)) src <- file.path(app_dir, "demo_edges.csv")
+    if (!file.exists(src)) stop("demo_edges.csv not found.")
+    file.copy(src, file, overwrite = TRUE)
+  }
+)
+
+output$dl_pubmedsummary_example <- downloadHandler(
+  filename = function() "pubmedsummary.txt",
+  content = function(file) {
+    src <- file.path(app_dir, "demo", "pubmedsummary.txt")
+    if (!file.exists(src)) src <- file.path(app_dir, "pubmedsummary.txt")
+    if (!file.exists(src)) stop("pubmedsummary.txt not found.")
+    file.copy(src, file, overwrite = TRUE)
+  }
+)
+
+output$dl_reference_example <- downloadHandler(
+  filename = function() "reference.csv",
+  content = function(file) {
+    src <- file.path(app_dir, "demo", "reference.csv")
+    if (!file.exists(src)) src <- file.path(app_dir, "reference.csv")
+    if (!file.exists(src)) stop("reference.csv not found.")
+    file.copy(src, file, overwrite = TRUE)
+  }
+)
+
+output$dl_wos_example <- downloadHandler(
+  filename = function() "wosauthor.csv",
+  content = function(file) {
+    src <- file.path(app_dir, "demo", "wosauthor.csv")
+    if (!file.exists(src)) src <- file.path(app_dir, "wosauthor.csv")
+    if (!file.exists(src)) stop("wosauthor.csv not found.")
+    file.copy(src, file, overwrite = TRUE)
   }
 )
 
