@@ -1,0 +1,33 @@
+[1],"Jensen PB, Jensen LJ, Brunak S. Mining electronic health records: towards better research applications and clinical care. Nat Rev Genet. 2012;13(6):395-405. Published 2012 May 2. doi:10.1038/nrg3208"
+[2],"Lee CH, Yoon HJ. Medical big data: promise and challenges. Kidney Res Clin Pract. 2017;36(1):3-11. doi:10.23876/j.krcp.2017.36.1.3"
+[3],"Chien TW, Chou W. 10StepsinExcelforWoS: Streamlining bibliometric analysis in Web of Science using Microsoft Excel. SoftwareX. 2025;32:102403. doi:10.1016/j.softx.2025.102403"
+[4],"Xu R, Wunsch DC 2nd. Clustering algorithms in biomedical research: a review. IEEE Rev Biomed Eng. 2010;3:120-154. doi:10.1109/RBME.2010.2083647"
+[5],"Li L, Cheng WY, Glicksberg BS, et al. Identification of type 2 diabetes subgroups through topological analysis of patient similarity. Sci Transl Med. 2015;7(311):311ra174. doi:10.1126/scitranslmed.aaa9364"
+[6],"Chien TW, Chou W. Visualizing leadership classificationsin rectangular data using a basket model and co-word network analysis: a case study of U.S. HCAHPS survey results. BMC Medical Research Methodology25:195. 2025/08/21 Available at https://rdcu.be/eBDzn"
+[7],Rousseeuw PJ. Silhouettes: a graphical aid to the interpretation and validation of cluster analysis. J Comput Appl Math. 1987;20:53-65. doi:10.1016/0377-0427(87)90125-7
+[8],"Chuang HY, Chou W. SilhouetteScoreinR: Beyond traditional network layouts by leveraging local cohesion and nearest neighbor separation. MethodsX. 2025;15:103622. Published 2025 Sep 11. doi:10.1016/j.mex.2025.103622"
+[9],"Lim SW, Chou W, Chen L. SankeyNetwork: A clear and concise visualization tool for bibliometric data. MethodsX. 2025;14:103379."
+[10],"B?rner K, Sanyal S, Vespignani A. Network science. Annu Rev Inform Sci Technol. 2007;41(1):537-607. doi:10.1002/aris.2007.1440410119"
+[11],Newman MEJ. Networks: An Introduction. Oxford University Press; 2010. https://www.psi.ir/theme2files/psi/fakhteh/fakhteh1.pdf
+[12],"Waltman L, van Eck NJ, Noyons ECM. A unified approach to mapping and clustering of bibliometric networks. J Informetr. 2010;4(4):629-635. doi:10.1016/j.joi.2010.07.002"
+[13],"Kaufman L, Rousseeuw PJ. Finding Groups in Data: An Introduction to Cluster Analysis. Biometrics 1990; John Wiley & Sons: DOI:10.2307/2532178"
+[14],R platform. R scripts for drawing SS plot. SilhouettePlotot 2025/08/21 available at 
+https://raschonline.com/raschonline/cbp.asp?cbp=DistanceMatrixfrom2datasets5,
+[15],R platform. App for silhouette plot. 2026/3/2 available at https://smilechien.shinyapps.io/zssplotauthor3/
+[16],Github. Data for this research.Github 2026/3/4 available at https://github.com/smilechien/SilhouettePlot2/ (2026/2/21)
+[17],"Yang DH, Chien TW, Yeh YT, Yang TY, Chou W, Lin JK. Using the absoluteadvantage coefficient (AAC) to measure the strength of damage hit byCOVID-19 in India on a growth-share matrix. Eur J Med Res. 2021;26(1):61.23."
+[18],Chien TW. Cronbach¡¦s alpha with the dimension coefficient to jointly assess ascale¡¦s quality. Rasch Meas Trans. 2012;26(3):1379
+[19],Chien TW. App for the interpretation of absolute advantage coefficient (AAC). SilhouettePlotot 2026/3/4 available at https://smilechien.shinyapps.io/AAC2/
+[20],R platform. How to implement the two R scripts. SilhouettePlotot 2025/08/21 available at https://youtu.be/ky362iLoVS0
+[21],"Li MJ, Lai FJ. Classifying research leadership in infantile hemangioma studies: A bibliometric analysis using Kano diagrams and absolute advantage coefficients. Medicine (Baltimore). 2025;104(40):e44905. doi:10.1097/MD.0000000000044905"
+[22],R Core Team. R: A Language and Environment for Statistical Computing. Vienna 2026/3/4 available at https://www.R-project.org/
+[23],"Posit. RStudio: Integrated Development Environment for R. Posit Software, PBC 2026/4/4 available at https://posit.co/"
+[24],R platform. Demo for csv-URL linked to SilhouettePlot. SilhouettePlotot 2026/3/4 available at https://smilechien.shinyapps.io/zssplotauthor3/?autorun=1&csv_url=https://raw.githubusercontent.com/smilechien/raschonline/main/DrKan.csv
+[25],R platform. URL linked to PubMed in search of terms to download summary text file. SilhouettePlotot 2026/3/4 available at  https://smilechien.shinyapps.io/zssplotauthor3/?autorun=1&pubmed_url=https://pubmed.ncbi.nlm.nih.gov/?term=Tsair-Wei+Chien%5BAuthor%5D&sort=date
+[26],Chen CM. CiteSpace II. Detecting and visualizing emerging trends and transient patterns in scientific literature. J Am Soc Inf Sci Tec. 2006;57(3):359-377. doi:10.1002/asi.20317
+[27],"Wei S, Cheng C, Zhong X. A Bibliometric Analysis of the Role and Research Trending of Bronchoalveolar Lavage in the Diagnosis and Treatment of Ventilator-Associated Pneumonia. Cureus. 2024 Jun 18;16(6):e62583. doi: 10.7759/cureus.62583. "
+[28],"Isola G, Polizzi A, Serra S, Boato M, Sculean A. Relationship between periodontitis and systemic diseases: A bibliometric and visual study. Periodontol 2000. 2025 Jan 8. doi: 10.1111/prd.12621. Epub ahead of print. PMID: 39775963."
+[29],"Chen X, Wang X, Li C, Zhang Y, Feng S, Xu S. A scientometric analysis of research on the role of NMDA receptor in the treatment of depression. Front Pharmacol. 2024 Jun 21;15:1394730. doi: 10.3389/fphar.2024.1394730. PMID: 38974036; PMCID: PMC11224522."
+[30],"Sab? M, Chen C, El-Hage W, Leroy A, Vaiva G, Monari S, Premand N, Bartolomei J, Caiolo S, Maercker A, Pietrzak RH, Clo?tre M, Kaiser S, Solmi M. Half a Century of Research on Posttraumatic Stress Disorder: A Scientometric Analysis. Curr Neuropharmacol. 2024;22(4):736-748."
+[31],"Chen R, Wei Y, Xu X, Zhang R, Tan Y, Zhang G, Yin H, Dai D, Li Q, Zhao R, Huang Q, Xu Y, Yang P, Liu J, Zuo Q. A bibliometric analysis of chronic subdural hematoma since the twenty-first century. Eur J Med Res. 2022 Dec 27;27(1):309."
+,
