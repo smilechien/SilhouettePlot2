@@ -1,34 +1,120 @@
+
+# =========================
+# CLEAN BOOTSTRAP (shared environment)
+# Goal: avoid "could not find function XXX" by sourcing helper scripts into ONE env
+# and exporting all functions/objects into .GlobalEnv.
+# =========================
+BOOT_DIR <- tryCatch(normalizePath(getwd(), winslash = "/", mustWork = TRUE), error = function(e) getwd())
+sharedEnv <- new.env(parent = .GlobalEnv)
+
+safe_source <- function(relpath) {
+  fp <- file.path(BOOT_DIR, relpath)
+  if (file.exists(fp)) {
+    source(fp, local = sharedEnv, encoding = "UTF-8")
+    message("[BOOT] sourced: ", relpath)
+    TRUE
+  } else {
+    message("[BOOT] missing: ", relpath, " (skipped)")
+    FALSE
+  }
+}
+
+# Source core helpers (add more files here if your app uses them)
+safe_source("utils.R")
+safe_source("flca_core.R")
+safe_source("pubmed_utils.R")
+safe_source("sankey.R")
+safe_source("renderSSplot.R")
+
+# Export everything into global so app.R can call functions normally
+try(list2env(as.list(sharedEnv, all.names = TRUE), envir = .GlobalEnv), silent = TRUE)
+
+# Confirm key functions (prints TRUE/FALSE)
+message("[BOOT] normalize_network: ", exists("normalize_network", mode="function"))
+message("[BOOT] add_link_metrics: ", exists("add_link_metrics", mode="function"))
+message("[BOOT] major_sample_topN: ", exists("major_sample_topN", mode="function"))
+message("[BOOT] build_one_link_edges: ", exists("build_one_link_edges", mode="function"))
+
+
+
+options(stringsAsFactors = FALSE)
+options(repos = c(CRAN="https://cloud.r-project.org"))
+
+# ---- Safe package loader: do NOT stop at sourcing time ----
+safe_require <- function(pkg) {
+  if (requireNamespace(pkg, quietly = TRUE)) {
+    suppressPackageStartupMessages(library(pkg, character.only = TRUE))
+    return(TRUE)
+  } else {
+    message("[WARN] Package not installed: ", pkg)
+    return(FALSE)
+  }
+}
+
+has_shiny    <- safe_require("shiny")
+has_dplyr    <- safe_require("dplyr")
+has_rmarkdown<- safe_require("rmarkdown")
+has_igraph   <- safe_require("igraph")
+has_scales   <- safe_require("scales")
+has_readr    <- safe_require("readr")
+has_DT       <- safe_require("DT")
+has_htmltools<- safe_require("htmltools")
+has_knitr    <- safe_require("knitr")
+
+datatables_html <- function(df, pageLength = 10, caption = NULL, rownames = FALSE) {
+  if (!is.data.frame(df)) df <- tryCatch(as.data.frame(df), error = function(e) data.frame())
+  if (requireNamespace("DT", quietly = TRUE) && requireNamespace("htmltools", quietly = TRUE)) {
+    w <- DT::datatable(df, rownames = rownames, options = list(pageLength = pageLength), caption = caption)
+    return(as.character(htmltools::as.tags(w)))
+  }
+  if (requireNamespace("knitr", quietly = TRUE)) {
+    return(as.character(knitr::kable(df, format = "html", escape = FALSE, caption = caption)))
+  }
+  out <- paste(utils::capture.output(print(df)), collapse = "\n")
+  paste0("<pre>", out, "</pre>")
+}
 # ---- Always-available helper: cannot be missing ----
 ensure_dir <- function(path) {
-  if (is.null(path) || !nzchar(path)) stop("out_dir is empty.")
+  if (is.null(path) || !isTRUE(nzchar(path))) stop("out_dir is empty.")
   if (!dir.exists(path)) dir.create(path, recursive = TRUE, showWarnings = FALSE)
   if (!dir.exists(path)) stop("Failed to create out_dir: ", path)
   invisible(path)
 }
 
-# ---- Simple sourcing (assuming working directory is app directory) ----
-app_dir <- getwd()
+# ---- Robust app_dir: resolve to folder containing app.R (fallback to getwd) ----
+app_dir <- tryCatch({
+  of <- sys.frame(1)$ofile
+  if (!is.null(of) && isTRUE(nzchar(of))) normalizePath(dirname(of), winslash = "/", mustWork = TRUE) else normalizePath(getwd(), winslash = "/", mustWork = TRUE)
+}, error = function(e) normalizePath(getwd(), winslash = "/", mustWork = TRUE))
 
-source(file.path(app_dir, "utils.R"), local = TRUE)
+
+
+`%||%` <- function(a, b) if (!is.null(a) && length(a) && !all(is.na(a))) a else b
+
+fetch_csv_to_temp <- function(url, timeout_sec = 30) {
+  url <- trimws(url %||% "")
+  if (!isTRUE(nzchar(url))) stop("csv_url is empty.")
+  if (!grepl("^https?://", url, ignore.case = TRUE)) stop("csv_url must start with http:// or https://")
+  tf <- tempfile(fileext = ".csv")
+  if (requireNamespace("curl", quietly = TRUE)) {
+    h <- curl::new_handle(timeout = timeout_sec)
+    curl::curl_download(url, destfile = tf, handle = h, quiet = TRUE)
+  } else {
+    utils::download.file(url, destfile = tf, quiet = TRUE, mode = "wb")
+  }
+  if (!file.exists(tf) || file.info(tf)$size <= 0) stop("Downloaded file is empty.")
+  head_txt <- tryCatch(paste(utils::head(readLines(tf, warn = FALSE), 5), collapse = "\n"), error = function(e) "")
+  if (isTRUE(nzchar(head_txt)) && grepl("<html|<!doctype", head_txt, ignore.case = TRUE)) {
+    stop("Downloaded content looks like HTML, not CSV. Use GitHub raw URL and ensure the file is public.")
+  }
+  tf
+}
+
+try(source(file.path(app_dir, "utils.R"),  local = TRUE), silent = TRUE)
+try(source(file.path(app_dir, "pubmed_utils.R"), local = TRUE), silent = TRUE)
 try(source(file.path(app_dir, "renderSSplot.R"), local = TRUE), silent = TRUE)
 try(source(file.path(app_dir, "sankey.R"),       local = TRUE), silent = TRUE)
-if (file.exists(file.path(app_dir, "appstable.R"))) {
-  try(source(file.path(app_dir, "appstable.R"), local = TRUE), silent = TRUE)
-}
 
-# Fallback in case utils.R did not fully load or helper is absent
-if (!exists("read_any_table", mode = "function")) {
-  read_any_table <- function(path) {
-    ext <- tolower(tools::file_ext(path))
-    if (ext %in% c("csv", "txt", "tsv")) {
-      out <- tryCatch(utils::read.csv(path, stringsAsFactors = FALSE, check.names = FALSE), error = function(e) NULL)
-      if (!is.null(out)) return(out)
-      out <- tryCatch(utils::read.delim(path, stringsAsFactors = FALSE, check.names = FALSE), error = function(e) NULL)
-      if (!is.null(out)) return(out)
-    }
-    stop("No available reader for file: ", basename(path))
-  }
-}
 
 options(stringsAsFactors = FALSE)
 # ---- Guard: avoid 'cannot change locked binding for data' ----
@@ -38,210 +124,34 @@ try({
   }
 }, silent = TRUE)
 options(repos = c(CRAN="https://cloud.r-project.org"))
-pkgs <- c("shiny","dplyr","rmarkdown","igraph","ggplot2","ggrepel","grid","readr")
-miss <- pkgs[!vapply(pkgs, requireNamespace, quietly=TRUE, FUN.VALUE=logical(1))]
-if (length(miss)) {
-  stop(
-    "Missing required packages: ", paste(miss, collapse = ", "),
-    "
-Please install them first, e.g.: install.packages(c(",
-    paste(sprintf('\"%s\"', miss), collapse = ", "),
-    "))"
-  )
-}
-suppressPackageStartupMessages({
-  library(shiny)
-  library(dplyr)
-  library(rmarkdown)
-  library(igraph)
-})
 
+options(stringsAsFactors = FALSE)
+options(repos = c(CRAN="https://cloud.r-project.org"))
 
-# ============================================================
-# Kano plot renderer (beautiful + safe) - overrides utils.R
-# Produces the style similar to the reference Kano plot.
-# ============================================================
-render_kano_png <- function(out_png, nodes, data, xcol = "value2", ycol = "value",
-                            title = "Kano plot", xlab = "Edge(Influence)", ylab = "Density(Dominance)",
-                            add_circle = TRUE) {
-  suppressPackageStartupMessages({
-    require(ggplot2)
-    require(ggrepel)
-    require(dplyr)
-    require(grid)
-  })
-
-  nodes <- as.data.frame(nodes, stringsAsFactors = FALSE)
-  data  <- as.data.frame(data,  stringsAsFactors = FALSE)
-
-  need_cols <- c("name", "carac", xcol, ycol)
-  miss <- setdiff(need_cols, names(nodes))
-  if (length(miss) > 0) stop("`nodes` missing: ", paste(miss, collapse = ", ") )
-
-  # Coerce numeric
-  nodes[[xcol]] <- suppressWarnings(as.numeric(nodes[[xcol]]))
-  nodes[[ycol]] <- suppressWarnings(as.numeric(nodes[[ycol]]))
-  nodes <- nodes[is.finite(nodes[[xcol]]) & is.finite(nodes[[ycol]]), , drop = FALSE]
-  if (nrow(nodes) < 2) stop("Not enough valid nodes to draw Kano plot.")
-
-  nodes$carac <- as.factor(nodes$carac)
-
-  # Default color set (cluster colors)
-  specified_colors <- c(
-    "#FF0000", "#0000FF", "#998000", "#008000", "#800080",
-    "#FFC0CB", "#000000", "#ADD8E6", "#FF4500", "#A52A2A",
-    "#8B4513", "#FF8C00", "#32CD32", "#4682B4", "#9400D3",
-    "#FFD700", "#C0C0C0", "#DC143C", "#1E90FF"
-  )
-  levels_carac <- levels(nodes$carac)
-  num_clusters <- length(levels_carac)
-  full_color_set <- if (num_clusters > length(specified_colors)) {
-    c(specified_colors, grDevices::hcl.colors(num_clusters - length(specified_colors), "Dark 3", rev = TRUE))
-  } else specified_colors
-  color_mapping <- setNames(full_color_set[seq_len(num_clusters)], levels_carac)
-  nodes$color <- unname(color_mapping[as.character(nodes$carac)])
-
-  # Build edges with coordinates (robust to colnames)
-  if (ncol(data) >= 2) {
-    colnames(data)[1:2] <- c("Source", "Target")
-  }
-  if (ncol(data) >= 3) {
-    colnames(data)[3] <- "WCD"
+# ---- Safe package loader: do NOT stop at sourcing time ----
+safe_require <- function(pkg) {
+  if (requireNamespace(pkg, quietly = TRUE)) {
+    suppressPackageStartupMessages(library(pkg, character.only = TRUE))
+    return(TRUE)
   } else {
-    data$WCD <- 1
+    message("[WARN] Package not installed: ", pkg)
+    return(FALSE)
   }
-
-  edges <- data %>%
-    dplyr::left_join(nodes %>% dplyr::select(name, dplyr::all_of(c(xcol, ycol)), color),
-                    by = c("Source" = "name")) %>%
-    dplyr::rename(x = .data[[xcol]], y = .data[[ycol]], color_source = color) %>%
-    dplyr::left_join(nodes %>% dplyr::select(name, dplyr::all_of(c(xcol, ycol)), color),
-                    by = c("Target" = "name")) %>%
-    dplyr::rename(xend = .data[[xcol]], yend = .data[[ycol]], color_target = color)
-
-  edges$edge_color <- edges$color_target
-  edges <- edges[is.finite(edges$x) & is.finite(edges$y) & is.finite(edges$xend) & is.finite(edges$yend), , drop = FALSE]
-
-  mean_x <- mean(nodes[[xcol]], na.rm = TRUE)
-  mean_y <- mean(nodes[[ycol]], na.rm = TRUE)
-
-  max_x <- max(c(nodes[[xcol]], edges$x, edges$xend), na.rm = TRUE)
-  min_x <- min(c(nodes[[xcol]], edges$x, edges$xend), na.rm = TRUE)
-  max_y <- max(c(nodes[[ycol]], edges$y, edges$yend), na.rm = TRUE)
-  min_y <- min(c(nodes[[ycol]], edges$y, edges$yend), na.rm = TRUE)
-
-  dx <- max_x - min_x;  if (!is.finite(dx) || dx == 0) dx <- 1
-  dy <- max_y - min_y;  if (!is.finite(dy) || dy == 0) dy <- 1
-  expand_x <- dx * 0.1
-  expand_y <- dy * 0.1
-
-  # Kano wings
-  t <- seq(0, 1, length.out = 300)
-  spread_x <- expand_x * 8
-  spread_y <- expand_y * 10
-  lower_curve <- data.frame(
-    x = t * spread_x - spread_x / 2 + mean_x,
-    y = mean_y - spread_y * (1 - t)^2
-  )
-  upper_curve <- data.frame(
-    x = -t * spread_x + spread_x / 2 + mean_x,
-    y = mean_y + spread_y * (1 - t)^2
-  )
-
-  diag_line <- data.frame(
-    x = seq(mean_x - 3 * expand_x, mean_x + 3 * expand_x, length.out = 300),
-    y = seq(mean_y - 3 * expand_y, mean_y + 3 * expand_y, length.out = 300)
-  )
-  slope_63_5 <- tan(43.5 * pi / 180)
-  diag_line_63_5 <- data.frame(
-    x = seq(mean_x - 5 * expand_x, mean_x + 5 * expand_x, length.out = 300)
-  )
-  diag_line_63_5$y <- slope_63_5 * (diag_line_63_5$x - mean_x) + mean_y
-
-  visual_ratio <- if (identical(xcol, "value2") && identical(ycol, "value")) 0.32 else (1 / 1.5)
-  circle_data <- NULL
-  if (isTRUE(add_circle)) {
-    x_lower <- function(tt) ( tt * spread_x - spread_x/2 + mean_x )
-    y_lower <- function(tt) ( mean_y - spread_y * (1 - tt)^2 )
-    x_upper <- function(tt) ( -tt * spread_x + spread_x/2 + mean_x )
-    y_upper <- function(tt) ( mean_y + spread_y * (1 - tt)^2 )
-
-    dist2_lower <- function(tt){
-      dx2 <- x_lower(tt) - mean_x
-      dy2 <- (y_lower(tt) - mean_y) * visual_ratio
-      dx2*dx2 + dy2*dy2
-    }
-    dist2_upper <- function(tt){
-      dx2 <- x_upper(tt) - mean_x
-      dy2 <- (y_upper(tt) - mean_y) * visual_ratio
-      dx2*dx2 + dy2*dy2
-    }
-    min_lower <- optimize(dist2_lower, interval = c(0, 1))$objective
-    min_upper <- optimize(dist2_upper, interval = c(0, 1))$objective
-    circle_radius <- (min(min_lower, min_upper) ** 0.5) * 0.999
-    theta <- seq(0, 2*3.141592653589793, length.out = 800)
-    circle_data <- data.frame(
-      x = mean_x + circle_radius * cos(theta),
-      y = mean_y + (circle_radius * sin(theta)) / visual_ratio
-    )
-  }
-
-  size_plot <- suppressWarnings(as.numeric(nodes[[ycol]]))
-  size_plot[!is.finite(size_plot)] <- NA
-  min_pos <- suppressWarnings(min(size_plot[size_plot > 0], na.rm = TRUE))
-  if (!is.finite(min_pos)) min_pos <- 1e-3
-  size_plot[size_plot <= 0] <- min_pos
-  nodes$size_plot <- size_plot
-
-  p_kano <- ggplot(nodes, aes(x = .data[[xcol]], y = .data[[ycol]])) +
-    geom_segment(
-      data = edges,
-      aes(x = x, y = y, xend = xend, yend = yend),
-      color = "gray60", linewidth = 0.8, alpha = 0.7
-    ) +
-    geom_point(aes(size = size_plot, fill = color), color = "black", shape = 21, alpha = 0.9) +
-    geom_text_repel(
-      aes(label = name),
-      size = 3.2,
-      max.overlaps = Inf,
-      box.padding = 0.45,
-      point.padding = 0.25,
-      force = 1.2,
-      force_pull = 0.2,
-      min.segment.length = 0,
-      segment.alpha = 0.65,
-      seed = 123
-    ) +
-    scale_fill_identity() +
-    scale_size(range = c(3, 12)) +
-    geom_vline(xintercept = mean_x, linetype = "dashed", color = "red") +
-    geom_hline(yintercept = mean_y, linetype = "dashed", color = "red") +
-    geom_line(data = lower_curve, aes(x = x, y = y), color = "blue", linewidth = 2) +
-    geom_line(data = upper_curve, aes(x = x, y = y), color = "blue", linewidth = 2) +
-    geom_line(data = diag_line,  aes(x = x, y = y), color = "gray70", linetype = "dotted") +
-    geom_line(data = diag_line_63_5, aes(x = x, y = y), color = "gray70", linetype = "dashed")
-
-  if (!is.null(circle_data)) {
-    p_kano <- p_kano + geom_path(data = circle_data, aes(x = x, y = y), color = "purple", linewidth = 1.1)
-  }
-
-  p_kano <- p_kano +
-    coord_fixed(ratio = visual_ratio, clip = "off") +
-    scale_x_continuous(limits = c(min_x - 3 * expand_x, max_x + 3 * expand_x)) +
-    scale_y_continuous(limits = c(min_y - 8 * expand_y, max_y + 22 * expand_y),
-                     expand = ggplot2::expansion(mult = c(0.02, 0.06))) +
-    labs(title = title, x = xlab, y = ylab, size = "Dominance") +
-    theme_minimal(base_family = "Microsoft JhengHei") +
-    theme(plot.title = element_text(size = 16, face = "bold", hjust = 0.5), legend.position = "none")
-
-  grDevices::png(out_png, width = 1200, height = 1200, res = 130)
-  on.exit({ grDevices::dev.off() }, add = TRUE)
-  print(p_kano)
-  invisible(out_png)
 }
+
+has_shiny    <- safe_require("shiny")
+has_dplyr    <- safe_require("dplyr")
+has_rmarkdown<- safe_require("rmarkdown")
+has_igraph   <- safe_require("igraph")
+has_scales   <- safe_require("scales")
+has_readr    <- safe_require("readr")
+has_DT       <- safe_require("DT")
+has_htmltools<- safe_require("htmltools")
+has_knitr    <- safe_require("knitr")
+
 # ---- Report Rmd template helper (created on-demand) ----
 ensure_report_rmd_template <- function(report_rmd_path) {
-  if (is.null(report_rmd_path) || !nzchar(report_rmd_path)) return(invisible(FALSE))
+  if (is.null(report_rmd_path) || !isTRUE(nzchar(report_rmd_path))) return(invisible(FALSE))
   dir.create(dirname(report_rmd_path), recursive = TRUE, showWarnings = FALSE)
   src <- file.path(app_dir, "report_template.Rmd")
   if (!file.exists(src)) stop("report_template.Rmd not found in app folder: ", src)
@@ -283,252 +193,337 @@ tryCatch({
 if (!isTRUE(flca_loaded)) {
   message("[WARN] FLCA core not loaded: ", flca_load_err)
   FLCA_run <- function(...) {
-    msg <- if (!is.null(flca_load_err) && nzchar(flca_load_err)) flca_load_err else "FLCA core not loaded"
+    msg <- if (!is.null(flca_load_err) && isTRUE(nzchar(flca_load_err))) flca_load_err else "FLCA core not loaded"
     stop(msg)
   }
 }
 
 options(FLCA_SHINY_NO_SIDE_EFFECTS = TRUE)
 source("renderSSplot.R", local = TRUE)  # provides render_panel()
-.extract_raw_query_param <- function(search, key) {
-  search <- as.character(search %||% "")
-  if (!nzchar(search)) return(NA_character_)
-  pat <- paste0("(?:^|[?&])", key, "=(.*)$")
-  m <- regexec(pat, search, perl = TRUE)
-  mm <- regmatches(search, m)[[1]]
-  if (length(mm) < 2) return(NA_character_)
-  val <- mm[2]
-  val <- sub("^\\?", "", val)
-  if (key == "pubmed_url") {
-    val <- sub("&autorun=.*$", "", val, perl = TRUE)
-  } else if (key == "csv_url") {
-    val <- sub("&autorun=.*$", "", val, perl = TRUE)
-    val <- sub("&pubmed_url=.*$", "", val, perl = TRUE)
-  }
-  utils::URLdecode(val)
-}
-
-.download_remote_to_file <- function(remote_url, destfile) {
-  remote_url <- as.character(remote_url %||% "")
-  if (!nzchar(remote_url)) return(FALSE)
-  ok <- tryCatch({
-    utils::download.file(remote_url, destfile = destfile, mode = "wb", quiet = TRUE, method = "libcurl")
-    file.exists(destfile) && isTRUE(file.info(destfile)$size > 0)
-  }, error = function(e) FALSE)
-  if (ok) return(TRUE)
-  ok <- tryCatch({
-    con <- url(remote_url, open = "rb")
-    on.exit(try(close(con), silent = TRUE), add = TRUE)
-    buf <- readBin(con, what = "raw", n = 5e7)
-    writeBin(buf, destfile)
-    file.exists(destfile) && isTRUE(file.info(destfile)$size > 0)
-  }, error = function(e) FALSE)
-  ok
-}
-
 ui <- fluidPage(
-  titlePanel("FLCA Top20 Report (PubMed, WoS, and coword data)"),
+  shinyjs::useShinyjs(),
+  tags$head(tags$script(HTML("
+    Shiny.addCustomMessageHandler(\'autoclick_run\', function(x){
+      var btn = document.getElementById(\'run\');
+      if(btn){ btn.click(); }
+    });
+  "))),
+  titlePanel("Author Collaboration Coword Analytics (AC-SaaS)"),
   sidebarLayout(
     sidebarPanel(
       fileInput("file", "Upload data (2 columns: Leader,Follower OR 3 columns: Leader,Follower,WCD)",
                 accept = c(".csv", ".txt", ".tsv")),
-      textInput("pubmed_url", "PubMed search hyperlink", value = "",
-                placeholder = "https://pubmed.ncbi.nlm.nih.gov/?term=Tsair-Wei+Chien%5BAuthor%5D&sort=date"),
       checkboxInput("use_demo", "Use demo (country.csv) if no upload", value = FALSE),
+                textInput("cmc", "CMC or test", value = "", placeholder = "type test for 7-day trial, or enter 10-digit CMC"),
+textInput("csv_url", "CSV URL (optional)", value = "https://raw.githubusercontent.com/smilechien/raschonline/main/drlai.csv", placeholder = "https://raw.githubusercontent.com/.../file.csv"),
       numericInput("topn", "Top N (sampling after FLCA)", value = 20, min = 10, max = 50),
       numericInput("per_cluster", "Major sampling: per cluster", value = 4, min = 1, max = 10),
       actionButton("run", "Generate HTML report", class = "btn-primary"),
       br(), br(),
       uiOutput("report_link"),
-      downloadButton("dl_report", "Download report.html"),
-      br(), br(),
-      tags$hr(),
-      h5("Example data"),
-      downloadButton("dl_demo_example", "1. demo"),
-      br(),
-      downloadButton("dl_pubmedsummary_example", "2. pubmedsummary"),
-      br(),
-      downloadButton("dl_reference_example", "3. AMA reference"),
-      br(),
-      downloadButton("dl_wos_example", "4. WoS coword")
+      downloadButton("dl_report", "Download report.html")
     ),
     mainPanel(
-      tabsetPanel(
-        id = "tabs",
+  tabsetPanel(
+    id = "tabs",
+    tabPanel("Home",
 
-        tabPanel("Home",
-          h4("Welcome"),
-          p("Upload data (or choose demo), then click 'Generate HTML report'. Your report will appear in the Report tab."),
-          tags$details(open = TRUE, style="border:1px solid #ddd;border-radius:12px;margin:12px 0;overflow:hidden;",
-            tags$summary(style="padding:10px 14px;cursor:pointer;background:#f6f6f6;font-weight:700;",
-                         "ReadMe (How to use this App)"),
-            tags$div(style="padding:8px 14px 0 14px;color:#8B0000;font-weight:700;", "Note: AMA-reference inputs keep all authors plus journal; PubMed URL and WoS one-column author inputs keep only the first and last authors plus journal."),
-            tags$div(style="padding:12px 14px;line-height:1.6;",
-              tags$ol(
-                tags$li(tags$b("Upload"), " a CSV/TXT/TSV with 2 columns (Leader, Follower), 3 columns (Leader, Follower, WCD), multi-column records, PubMed summary text, AMA references, or WoS one-column ';' data."),
-                tags$li(tags$b("PubMed URL"), " paste a PubMed search hyperlink to fetch all MEDLINE summary records automatically."),
-                tags$li(tags$b("Example link: CSV"), tags$a(" https://smilechien.shinyapps.io/zssplotauthor3/?autorun=1&csv_url=https://raw.githubusercontent.com/smilechien/raschonline/main/DrKan.csv", href = "https://smilechien.shinyapps.io/zssplotauthor3/?autorun=1&csv_url=https://raw.githubusercontent.com/smilechien/raschonline/main/DrKan.csv", target = "_blank")),
-                tags$li(tags$b("Example link: PubMed"), tags$a(" https://smilechien.shinyapps.io/zssplotauthor3/?autorun=1&pubmed_url=https://pubmed.ncbi.nlm.nih.gov/?term=Tsair-Wei+Chien%5BAuthor%5D&sort=date", href = "https://smilechien.shinyapps.io/zssplotauthor3/?autorun=1&pubmed_url=https://pubmed.ncbi.nlm.nih.gov/?term=Tsair-Wei+Chien%5BAuthor%5D&sort=date", target = "_blank")),
-                tags$li(tags$b("Run"), " click 'Generate HTML report' to compute FLCA, major sampling, and figures."),
-                tags$li(tags$b("View"), " figures in the Figures tab (Network, SSplot, Kano1, Kano2, PCA, Sankey)."),
-                tags$li(tags$b("Download"), " tables/figures from the Downloads tab (includes demo data for learning)."),
-                tags$li(tags$b("Report"), " open the self-contained HTML report, or download report.html.")
-              ),
-              tags$ul(
-                tags$li(tags$strong("Author rule for visual analysis:"), " AMA-reference inputs keep all authors and the journal. PubMed URL and WoS author inputs keep only the first and last authors and the journal."),
-                tags$li("Top N controls how many nodes are kept after FLCA (default 20)."),
-                tags$li("Major sampling per cluster controls balance across clusters."),
-                tags$li("If you only want to learn the format, download the demo data first.")
-              )
-            )
-          ),
+      tags$div(style="color:red;font-weight:bold;margin:8px 0 12px 0;",
+               "NOTE: type test for 7-day trial, or enter valid CMC (e.g., 57306**835) on request."),
+h4("Welcome"),
+      p("Please confirm your data format before running the analysis. The following five rules correspond one-to-one with how this App interprets inputs and applies priority:"),
+      tags$ol(
+        tags$li(
+          tags$b("Multi-column (≥ 2) co-word data:"),
+          " Treated as an edge list (from, to[, weight]). The original workflow remains unchanged."
+        ),
+        tags$li(
+          tags$b("2-column WoS data (Fields B and Y):"),
           tags$ul(
-            tags$li("Accepted formats: CSV / TXT / TSV or a PubMed search hyperlink"),
-            tags$li("Input types: 2/3-column coword, multi-column records, PubMed summary, AMA references, WoS one-column ';' data"),
-            tags$li("Output: self-contained HTML report + PNG figures")
+            tags$li("B: Author list (with ';') → take the first author before ';', then extract Last, IN (e.g., Chang, WT)."),
+            tags$li("Y: Corresponding author string (with 'correspond') → extract the first Last, IN (e.g., Kan, WC)."),
+            tags$li("Output: Leader / follower / WCD = 1.")
           )
         ),
-
-        tabPanel("Figures",
-          tabsetPanel(
-            id = "fig_tabs",
-            tabPanel("Network (Top20)",
-              h4("Network (Top20)"),
-              imageOutput("fig_network")
-            ),
-            tabPanel("SS plot",
-              h4("SS plot"),
-              imageOutput("fig_ssplot")
-            ),
-            tabPanel("Kano1",
-              h4("Kano1"),
-              imageOutput("fig_kano1")
-            ),
-            tabPanel("Kano2",
-              h4("Kano2"),
-              imageOutput("fig_kano2")
-            ),
-            tabPanel("PCA",
-              h4("PCA"),
-              imageOutput("fig_pca")
-            ),
-            tabPanel("Sankey",
-              h4("Sankey (Top20 nodes & relations)"),
-              plotOutput("sankey_plot", height = "600px"),
-              uiOutput("sankey_code_block")
-            )
+        tags$li(
+          tags$b("Single-column WoS data (Fields A, F, T, or U):"),
+          tags$ul(
+            tags$li("If the content contains ';': treated as an author list → first author as Leader; remaining authors as followers (multiple edges per record, WCD = 1)."),
+            tags$li("If ';' is not present: the App will request either a 2-column (B, Y) input or a single column containing ';' to avoid incorrect execution.")
           )
         ),
-
-        tabPanel("Downloads",
-          h4("Download demo data (for learning)"),
-          downloadButton("dl_demo_data", "Download demo dataset (CSV)"),
-          br(), br(),
-          h4("Download tables"),
-          downloadButton("dl_top20_nodes", "Download Top20 nodes (CSV)"),
-          downloadButton("dl_top20_edges", "Download Top20 relations (CSV)"),
-          br(), br(),
-          h4("Download figures"),
-          downloadButton("dl_fig_network", "Download Network PNG"),
-          downloadButton("dl_fig_ssplot",  "Download SSplot PNG"),
-          downloadButton("dl_fig_kano1",   "Download Kano1 PNG"),
-          downloadButton("dl_fig_kano2",   "Download Kano2 PNG"),
-          downloadButton("dl_fig_pca",     "Download PCA PNG"),
-          downloadButton("dl_all_figs",    "Download ALL figures (ZIP)"),
-          br(), br(),
-          h5("Top20 nodes (preview)"),
-          tableOutput("tbl_top20_nodes"),
-          h5("Top20 relations (preview)"),
-          tableOutput("tbl_top20_edges")
+        tags$li(
+          tags$b("No upload and demo not checked: URL will be used:"),
+          " Input priority is: upload > demo (checked) > URL (demo unchecked and URL provided) > otherwise an error."
         ),
-
-        tabPanel("Report",
-          uiOutput("report_iframe")
+        tags$li(
+          tags$b("CSV provided via URL still requires clicking Generate HTML report:"),
+          " The URL specifies the data source only; the full pipeline runs only after clicking the button (no auto-run)."
+        )
+      ),
+      hr(),
+      h4("歡迎"),
+      p("請先確認你上傳或提供的資料格式。以下五條規則與本 App 的資料判讀與優先順序逐條對應："),
+      tags$ol(
+        tags$li(
+          tags$b("多欄（≥2）共字資料："),
+          "仍視為 edge list（from, to[, weight]），原流程不改。"
+        ),
+        tags$li(
+          tags$b("2 欄 WoS（欄 B 與 Y）："),
+          tags$ul(
+            tags$li("B：作者串（含 ;）→ 取 ; 前第一作者，再抽出 Last, IN（例如 Chang, WT）。"),
+            tags$li("Y：通訊作者串（含 correspond）→ 抽出第一個 Last, IN（例如 Kan, WC）。"),
+            tags$li("產出 Leader / follower / WCD = 1。")
+          )
+        ),
+        tags$li(
+          tags$b("單欄 WoS（A、F、T 或 U 欄）："),
+          tags$ul(
+            tags$li("若內容含 ;：視為作者串 → 第一作者為 Leader，其餘作者為 follower（每筆多條 edge，WCD = 1）。"),
+            tags$li("若不含 ;：將提示需提供 2 欄（B, Y）或含 ; 的 1 欄，避免錯誤執行。")
+          )
+        ),
+        tags$li(
+          tags$b("未上傳且未勾選 demo 時，以 URL 為準："),
+          "資料來源優先順序為：upload > demo（已勾選）> URL（未勾 demo 且有填）> 否則報錯。"
+        ),
+        tags$li(
+          tags$b("URL 指向 CSV 時仍需點選 Generate HTML report："),
+          "URL 僅作為資料來源，仍需按下按鈕才會執行完整流程（不自動跑）。"
         )
       )
+
+    ),
+    tabPanel("Figures",
+      tabsetPanel(
+        id = "fig_tabs",
+        tabPanel("Network (Top20)",
+          h4("Network (Top20)"),
+          imageOutput("fig_network")
+        ),
+        tabPanel("SS plot",
+          h4("SS plot"),
+          imageOutput("fig_ssplot")
+        ),
+        tabPanel("Kano1",
+          h4("Kano1"),
+          imageOutput("fig_kano1")
+        ),
+        tabPanel("Kano2",
+          h4("Kano2"),
+          imageOutput("fig_kano2")
+        ),
+        tabPanel("PCA",
+          h4("PCA"),
+          imageOutput("fig_pca")
+        ),
+        tabPanel("Sankey",
+          h4("Sankey (Top20 nodes & relations)"),
+          plotOutput("sankey_plot", height = "600px"),
+          uiOutput("sankey_code_block")
+        )
+      )
+    ),
+    tabPanel("Downloads",
+      h4("Download tables"),
+      downloadButton("dl_top20_nodes", "Download Top20 nodes (CSV)"),
+      downloadButton("dl_top20_edges", "Download Top20 relations (CSV)"),
+      br(), br(),
+      h5("Top20 nodes (preview)"),
+      tableOutput("tbl_top20_nodes"),
+      h5("Top20 relations (preview)"),
+      tableOutput("tbl_top20_edges")
+    ),
+    tabPanel("Report",
+      uiOutput("report_iframe")
     )
   )
 )
-server <- function(input, output, session) {
-  rv <- reactiveValues(
-    report_path   = NULL,
-    report_prefix = NULL,
-    fig_paths     = NULL,
-    top20_nodes   = NULL,
-    top20_edges   = NULL,
-    sankey_url    = NULL,
-    sankey_code   = NULL,
-    remote_csv_path = NULL,
-    pubmed_summary_path = NULL,
-    autorun_fired = FALSE
   )
-  .autorun_query_values <- reactive({
-    search <- session$clientData$url_search %||% ""
-    qs <- tryCatch(shiny::parseQueryString(search), error = function(e) list())
-    raw_csv <- .extract_raw_query_param(search, "csv_url")
-    if (is.na(raw_csv) || !nzchar(raw_csv)) raw_csv <- as.character(qs$csv_url %||% "")
-    raw_pubmed <- .extract_raw_query_param(search, "pubmed_url")
-    if (is.na(raw_pubmed) || !nzchar(raw_pubmed)) raw_pubmed <- as.character(qs$pubmed_url %||% "")
-    list(
-      autorun = !is.null(qs$autorun) && as.character(qs$autorun)[1] %in% c("1", "true", "TRUE", "yes"),
-      csv_url = trimws(as.character(raw_csv %||% "")),
-      pubmed_url = trimws(as.character(raw_pubmed %||% ""))
-    )
-  })
-  
+,
+tags$style(HTML("
+  .contact-fab{position:fixed;right:18px;bottom:18px;z-index:9999;}
+  .contact-fab .btn{background:#1f77b4;color:white;border:none;border-radius:999px;
+    padding:10px 14px;font-weight:600;box-shadow:0 6px 18px rgba(0,0,0,.18);}
+")),
+tags$div(class="contact-fab", actionButton("contact_btn", "💬 Contact authors / Request CMC", class="btn"))
+)
+server <- function(input, output, session) {
+  # ---- reactive state ----
+  rv <- reactiveValues(
+    report_path = NULL,
+    report_prefix = NULL,
+    fig_paths = list(),
+    top20_nodes = NULL,
+    top20_edges = NULL,
+    sankey_code = "",
+    sankey_url = "",
+    owner_title = "",
+    autorun_flag = "",
+    autorun = "",
+    autorun_sig = NULL,
+    csv_url_param = "",
+    term_param = "",
+    mesh_param = "",
+    title_param = ""
+  )
+
+  # Read URL params early (for autorun etc.)
   observe({
-    qs <- tryCatch(shiny::parseQueryString(session$clientData$url_search %||% ""), error = function(e) list())
-    raw_csv <- .extract_raw_query_param(session$clientData$url_search %||% "", "csv_url")
-    if (is.na(raw_csv) || !nzchar(raw_csv)) raw_csv <- as.character(qs$csv_url %||% "")
-    if (is.na(raw_csv) || !nzchar(raw_csv)) return()
-    if (!is.null(rv$remote_csv_path) && nzchar(rv$remote_csv_path)) return()
-    tmp_ext <- tolower(tools::file_ext(raw_csv))
-    if (!nzchar(tmp_ext)) tmp_ext <- "csv"
-    tmp <- tempfile(fileext = paste0(".", tmp_ext))
-    ok <- .download_remote_to_file(raw_csv, tmp)
+    qs <- session$clientData$url_search %||% ""
+    if (!isTRUE(nzchar(qs))) return()
+    q <- qs; if (startsWith(q, "?")) q <- substring(q, 2)
+    parts <- strsplit(q, "&", fixed = TRUE)[[1]]
+    kv <- strsplit(parts, "=", fixed = TRUE)
+    keys <- vapply(kv, function(x) if (length(x) >= 1) x[[1]] else "", character(1))
+    vals <- lapply(kv, function(x) if (length(x) >= 2) URLdecode(x[[2]]) else "")
+    mp <- setNames(vals, keys)
+    rv$autorun_flag <- as.character((mp[["autorun"]] %||% "")[[1]])
+    rv$autorun <- rv$autorun_flag
+    rv$cmc_param <- as.character((mp[["cmc"]] %||% "")[[1]])
+    rv$title_param <- as.character((mp[["title"]] %||% "")[[1]])
+    rv$csv_url_param <- as.character((mp[["csv_url"]] %||% mp[["url"]] %||% "")[[1]])
+    rv$term_param <- as.character((mp[["term"]] %||% "")[[1]])
+    rv$mesh_param <- as.character((mp[["mesh"]] %||% "")[[1]])
+  })
+
+
+
+
+# ---- Prefill CMC input box from query (?cmc=...) ----
+observeEvent(rv$cmc_param, {
+  v <- trimws(as.character(rv$cmc_param %||% ""))
+  if (!isTRUE(nzchar(v))) return()
+  # Only prefill if the user hasn't typed anything yet
+  cur <- trimws(as.character(isolate(input$cmc) %||% ""))
+  if (!isTRUE(nzchar(cur))) {
+    updateTextInput(session, "cmc", value = v)
+    message("[URL] Prefilled cmc into input box: ", v)
+  }
+}, ignoreInit = FALSE)
+# ---- Floating contact button ----
+observeEvent(input$contact_btn, {
+  showModal(modalDialog(
+    title = "Contact authors / Request CMC",
+    easyClose = TRUE,
+    footer = modalButton("Close"),
+    tags$p("Please choose one of the following ways to contact the authors."),
+    tags$h4("1) LINE account"),
+    tags$p("LINE Official Account ID:"), tags$code("@onq5657t"),
+    tags$p(tags$a("Open LINE add-friend page", href="https://line.me/R/ti/p/%40onq5657t",
+                  target="_blank", rel="noopener noreferrer")),
+    tags$hr(),
+    tags$h4("2) Email"),
+    tags$ul(
+      tags$li(tags$code("rasch.smile@gmail.com")),
+      tags$li(tags$code("codingpaperabc@gmail.com"))
+    ),
+    tags$hr(),
+    tags$h4("3) Donation"),
+    tags$p("Voluntary donations are appreciated to support ongoing maintenance and further development."),
+    tags$a("🚀 Donate",
+           href="https://payment.ecpay.com.tw/QuickCollect/PayData?D50jzB3Lqk68BhoyYtTffB90EJpM0b4XmYFUwS4pAMI%3d",
+           target="_blank", rel="noopener noreferrer")
+  ))
+})
+
+
+
+# Read URL parameters (do NOT prefill input boxes)
+
+  # Autorun: trigger analysis once when ?autorun=1 (robust: wait until UI is flushed)
+  session$onFlushed(function() {
+    ar <- trimws(as.character(isolate(rv$autorun) %||% ""))
+    if (!isTRUE(nzchar(ar)) || ar != "1") return(invisible(NULL))
+    if (!is.null(isolate(rv$autorun_sig)) && identical(isolate(rv$autorun_sig), "done")) return(invisible(NULL))
+    isolate({ rv$autorun_sig <- "done" })
+
+    # Prefer shinyjs click (requires useShinyjs() in UI)
+    ok <- TRUE
+    tryCatch({
+      shinyjs::click("run")
+    }, error = function(e) { ok <<- FALSE })
+
+    # Fallback: emulate button press by sending a new value
     if (!ok) {
-      showNotification("Failed to download csv_url data.", type = "error", duration = NULL)
-      return()
+      tryCatch({
+        session$sendInputMessage("run", list(value = as.integer(Sys.time())))
+      }, error = function(e) NULL)
     }
-    rv$remote_csv_path <- tmp
-    showNotification(paste0("Loaded remote data from csv_url: ", basename(tmp)), type = "message")
-    if (!is.null(qs$autorun) && as.character(qs$autorun)[1] %in% c("1", "true", "TRUE", "yes")) {
-      isolate({
-        shiny::updateCheckboxInput(session, "use_demo", value = FALSE)
-      })
-      shiny::updateActionButton(session, "run", label = "Generate HTML report")
-      later::later(function() {
-        try(session$sendInputMessage("run", list(value = as.numeric(Sys.time()))), silent = TRUE)
-      }, delay = 0.6)
-    }
-  })
+
+    invisible(NULL)
+  }, once = TRUE)
 
 
 
+
+  # ---- Prefill CSV URL from query string (?csv_url=... or ?url=...) ----
+observeEvent(session$clientData$url_search, {
+  raw_qs <- sub("^\\?", "", as.character(session$clientData$url_search %||% ""))
+  if (!isTRUE(nzchar(raw_qs))) return()
+
+  qs <- shiny::parseQueryString(raw_qs)
+  if (!is.list(qs)) qs <- as.list(qs)
+
+  v <- trimws(as.character(qs[["csv_url"]] %||% ""))
+  if (!isTRUE(nzchar(v))) v <- trimws(as.character(qs[["url"]] %||% ""))
+
+  if (isTRUE(nzchar(v))) {
+    updateTextInput(session, "csv_url", value = v)
+    showNotification(paste0("Loaded CSV URL from link: ", v), type = "message", duration = 5)
+    message("[URL] Loaded csv_url from query: ", v)
+  }
+}, ignoreInit = FALSE)
+  # ---- AUTO-RUN (autorun=1): click Generate HTML report when ready ----
   observe({
-    req(session$clientData$url_search)
-    qs <- tryCatch(shiny::parseQueryString(session$clientData$url_search %||% ""), error = function(e) list())
-    raw_pubmed <- .extract_raw_query_param(session$clientData$url_search %||% "", "pubmed_url")
-    if (is.na(raw_pubmed) || !nzchar(raw_pubmed)) raw_pubmed <- as.character(qs$pubmed_url %||% "")
-    if (!is.na(raw_pubmed) && nzchar(raw_pubmed) && !identical(input$pubmed_url, raw_pubmed)) {
-      shiny::updateTextInput(session, "pubmed_url", value = raw_pubmed)
-    }
+    # Auto-run only when autorun=1 AND (CMC ok) AND (some data source is ready).
+    if (!identical(trimws(as.character(rv$autorun_flag %||% "")), "1")) return()
+
+    cmc_raw <- trimws(as.character(input$cmc %||% ""))
+    cmc_q   <- trimws(as.character(rv$cmc_param %||% ""))
+    if (!isTRUE(nzchar(cmc_raw)) && isTRUE(nzchar(cmc_q))) cmc_raw <- cmc_q
+
+    cmc_ok <- identical(tolower(cmc_raw), "test") || grepl("^[0-9]{10}$", cmc_raw)
+
+    has_file <- (is.data.frame(input$file) && nrow(input$file) > 0 && !is.na(input$file$datapath[[1]]) && isTRUE(nzchar(input$file$datapath[[1]])))
+    has_term <- isTRUE(nzchar(trimws(as.character(rv$term_param %||% ""))))
+    has_demo <- isTRUE(input$use_demo)
+    has_url  <- isTRUE(nzchar(trimws(isolate(input$csv_url) %||% ""))) || isTRUE(nzchar(trimws(as.character(rv$csv_url_param %||% ""))))
+    has_data <- has_file || has_term || has_demo || has_url
+
+    if (!(cmc_ok && has_data)) return()
+
+    invalidateLater(450, session)
+
+    sig <- paste0(
+      "cmc=", cmc_raw,
+      "|file=", if (is.data.frame(input$file) && nrow(input$file) > 0) (input$file$datapath[[1]] %||% "") else "",
+      "|term=", trimws(as.character(rv$term_param %||% "")),
+      "|mesh=", trimws(as.character(rv$mesh_param %||% "")),
+      "|url=",  trimws(isolate(input$csv_url) %||% ""),
+      "|topn=", input$top_n %||% "",
+      "|percl=", input$per_cluster %||% "",
+      "|demo=", input$use_demo %||% ""
+    )
+    if (!is.null(rv$autorun_sig) && identical(rv$autorun_sig, sig)) return()
+    rv$autorun_sig <- sig
+
+    session$sendCustomMessage("autoclick_run", list())
   })
 
+observeEvent(input$run, {
 
-  observe({
-    qv <- .autorun_query_values()
-    if (!isTRUE(qv$autorun) || isTRUE(rv$autorun_fired)) return()
-    if (!nzchar(qv$pubmed_url) && !nzchar(qv$csv_url)) return()
-    rv$autorun_fired <- TRUE
-    isolate({ shiny::updateCheckboxInput(session, "use_demo", value = FALSE) })
-    shiny::updateActionButton(session, "run", label = "Generate HTML report")
-    later::later(function() {
-      try(session$sendInputMessage("run", list(value = as.numeric(Sys.time()))), silent = TRUE)
-    }, delay = 1.0)
-  })
+# ---- Access control (CMC / test) ----
+cmc_raw <- trimws(as.character(input$cmc %||% ""))
+cmc_q <- trimws(as.character(rv$cmc_param %||% ""))
+if (!isTRUE(nzchar(cmc_raw)) && isTRUE(nzchar(cmc_q))) cmc_raw <- cmc_q
+is_valid_access <- identical(tolower(cmc_raw), "test") || grepl("^[0-9]{10}$", cmc_raw)
+if (!is_valid_access) {
+  showNotification("Invalid access. Type 'test' for 7-day trial, or enter valid CMC.", type = "error", duration = 8)
+  return(invisible(NULL))
+}
 
-  observeEvent(input$run, {
     
             # ---- Scalar-safe helper (prevents knitr 'text length zero') ----
             safe1 <- function(x) {
@@ -536,50 +531,215 @@ server <- function(input, output, session) {
               x1 <- x[[1]]
               if (is.null(x1) || length(x1) == 0) return("")
               x1 <- as.character(x1)
-              if (is.na(x1) || !nzchar(x1)) return("")
+              if (is.na(x1) || !isTRUE(nzchar(x1))) return("")
               x1
             }
+
+# ---- PubMed first-last fallback (in case pubmed_utils returns empty) ----
+pubmed_fetch_edges_first_last_fallback <- function(term, retmax = 200L) {
+  if (!requireNamespace("rentrez", quietly = TRUE)) {
+    stop("PubMed fallback requires package 'rentrez'. Install it via install.packages('rentrez').")
+  }
+  s <- rentrez::entrez_search(db = "pubmed", term = term, retmax = as.integer(retmax))
+  pmids <- s$ids
+  message("[POMER-FB] hits=", s$count, " fetched=", length(pmids))
+  if (length(pmids) == 0) {
+    return(data.frame(Leader=character(), Follower=character(), WCD=integer(), stringsAsFactors=FALSE))
+  }
+  xml_txt <- rentrez::entrez_fetch(db="pubmed", id=pmids, rettype="xml", parsed=FALSE)
+  if (!isTRUE(nzchar(xml_txt))) {
+    return(data.frame(Leader=character(), Follower=character(), WCD=integer(), stringsAsFactors=FALSE))
+  }
+  pick_tag <- function(x, tag) {
+    m <- regexec(paste0("<", tag, ">([\\s\\S]*?)</", tag, ">"), x, perl=TRUE)
+    r <- regmatches(x, m)[[1]]
+    if (length(r) >= 2) r[2] else ""
+  }
+  get_authors <- function(article_xml) {
+    a_blocks <- regmatches(article_xml, gregexpr("<Author\\b[\\s\\S]*?</Author>", article_xml, perl=TRUE))[[1]]
+    if (length(a_blocks) == 0) return(character())
+    authors <- vapply(a_blocks, function(b) {
+      last <- pick_tag(b, "LastName")
+      ini  <- pick_tag(b, "Initials")
+      fore <- pick_tag(b, "ForeName")
+      if (isTRUE(nzchar(last)) && isTRUE(nzchar(ini))) return(paste(last, ini))
+      if (isTRUE(nzchar(last)) && isTRUE(nzchar(fore))) return(paste(last, fore))
+      coll <- pick_tag(b, "CollectiveName")
+      if (isTRUE(nzchar(coll))) return(coll)
+      ""
+    }, character(1))
+    authors <- trimws(authors)
+    authors <- authors[nzchar(authors)]
+    unique(authors)
+  }
+  articles <- regmatches(xml_txt, gregexpr("<PubmedArticle\\b[\\s\\S]*?</PubmedArticle>", xml_txt, perl=TRUE))[[1]]
+  if (length(articles) == 0) {
+    return(data.frame(Leader=character(), Follower=character(), WCD=integer(), stringsAsFactors=FALSE))
+  }
+  author_lists <- lapply(articles, get_authors)
+  author_lists <- author_lists[vapply(author_lists, length, integer(1)) >= 2]
+  if (length(author_lists) == 0) {
+    return(data.frame(Leader=character(), Follower=character(), WCD=integer(), stringsAsFactors=FALSE))
+  }
+  edges <- do.call(rbind, lapply(author_lists, function(a) {
+    data.frame(Leader=a[1], Follower=a[length(a)], stringsAsFactors=FALSE)
+  }))
+  edges <- edges[edges$Leader != edges$Follower, , drop=FALSE]
+  if (nrow(edges) == 0) {
+    return(data.frame(Leader=character(), Follower=character(), WCD=integer(), stringsAsFactors=FALSE))
+  }
+  key <- paste(edges$Leader, edges$Follower, sep="|||")
+  tab <- table(key)
+  keys <- names(tab)
+  data.frame(
+    Leader = sub("\\|\\|\\|.*$", "", keys),
+    Follower = sub("^.*\\|\\|\\|", "", keys),
+    WCD = as.integer(tab),
+    stringsAsFactors=FALSE
+  )
+}
     withProgress(message = "Generating report...", value = 0, {
       tryCatch({
         incProgress(0.1, detail = "Loading data")
-        # Prefer uploaded file if provided; otherwise fall back to URL params from the current page.
-        qv <- .autorun_query_values()
-        pubmed_url_now <- trimws(as.character(input$pubmed_url %||% ""))
-        if (!nzchar(pubmed_url_now) && nzchar(qv$pubmed_url)) pubmed_url_now <- qv$pubmed_url
-        remote_csv_now <- rv$remote_csv_path
-        if ((is.null(remote_csv_now) || !nzchar(remote_csv_now) || !file.exists(remote_csv_now)) && nzchar(qv$csv_url)) {
-          tmp_ext <- tolower(tools::file_ext(qv$csv_url)); if (!nzchar(tmp_ext)) tmp_ext <- "csv"
-          tmp <- tempfile(fileext = paste0(".", tmp_ext))
-          ok <- .download_remote_to_file(qv$csv_url, tmp)
-          if (ok && file.exists(tmp)) {
-            rv$remote_csv_path <- tmp
-            remote_csv_now <- tmp
+        # Data source priority (AC-SaaS):
+        # 1) Upload file
+        # 2) PubMed term (mesh optional)
+        # 3) Demo
+        # 4) CSV URL (including homepage default)
+        if (is.data.frame(input$file) && nrow(input$file) > 0 && !is.na(input$file$datapath[[1]]) && isTRUE(nzchar(input$file$datapath[[1]]))) {
+          dat <- read_any_table(input$file$datapath[[1]])
+
+        } else if (isTRUE(nzchar(trimws(as.character(rv$term_param %||% ""))))) {
+          # PubMed term (and optional mesh mode)
+          if (!exists("pubmed_fetch_edges_first_last", mode = "function")) {
+            stop("PubMed helper not available: pubmed_utils.R not loaded.")
+          }
+          if (!requireNamespace("rentrez", quietly = TRUE)) {
+            stop("PubMed requires the R package 'rentrez'. Install it via install.packages('rentrez').")
+          }
+          term_q  <- trimws(as.character(rv$term_param %||% ""))
+          has_mesh <- isTRUE(nzchar(trimws(as.character(rv$mesh_param %||% ""))))
+          if (has_mesh) {
+            if (!exists("pubmed_fetch_mesh_coword_edges", mode = "function")) {
+              stop("MeSH helper not available: pubmed_fetch_mesh_coword_edges not found.")
+            }
+            dat <- pubmed_fetch_mesh_coword_edges(term_q, retmax = 300L, per_article_cap = 25L, top_global = 200L)
+
+rv$n_doc <- suppressWarnings(as.integer(attr(dat, "n_doc")))
+if (!is.finite(rv$n_doc) || rv$n_doc <= 0) rv$n_doc <- NA_integer_
+          } else {
+            
+message("[SRC] pubmed first-last term=", term_q)
+dat <- pubmed_fetch_edges_first_last(term_q, retmax = 200L)
+
+# record publication count for plotting (n=xx at bottom of SS plot)
+rv$n_doc <- suppressWarnings(as.integer(attr(dat, "n_doc")))
+if (!is.finite(rv$n_doc) || rv$n_doc <= 0) rv$n_doc <- NA_integer_
+message("[SRC] pubmed first-last loaded: nrow=", if (is.data.frame(dat)) nrow(dat) else NA, " ncol=", if (is.data.frame(dat)) ncol(dat) else NA)
+if (is.data.frame(dat) && nrow(dat) == 0) {
+  message("[SRC] pubmed_utils returned 0 rows; trying fallback rentrez parser...")
+  dat <- pubmed_fetch_edges_first_last_fallback(term_q, retmax = 200L)
+  message("[SRC] fallback loaded: nrow=", if (is.data.frame(dat)) nrow(dat) else NA, " ncol=", if (is.data.frame(dat)) ncol(dat) else NA)
+}}
+
+        } else if (isTRUE(input$use_demo)) {
+          demo_path <- file.path(app_dir, "country.csv")
+          if (!file.exists(demo_path)) stop("country.csv not found in app folder: ", demo_path)
+          dat <- read_any_table(demo_path)
+
+        } else if (isTRUE(nzchar(trimws(isolate(input$csv_url) %||% ""))) || isTRUE(nzchar(trimws(as.character(rv$csv_url_param %||% ""))))) {
+          url <- trimws(isolate(input$csv_url) %||% "")
+          if (!isTRUE(nzchar(url))) url <- trimws(as.character(rv$csv_url_param %||% ""))
+          showNotification(paste0("Downloading CSV from: ", url), type = "message", duration = 5)
+          message("[URL] Downloading CSV: ", url)
+          tf <- fetch_csv_to_temp(url)
+          dat <- read_any_table(tf)
+
+        } else {
+          stop("No data. Upload a CSV, provide a PubMed term, use demo, or give a CSV URL.")
+        }
+        
+        
+# ---- 1-column ';' co-word list -> edge list (Leader/follower/WCD) ----
+# If input is a single column and contains ';', treat each row as a bag of terms separated by ';'.
+# Generate all unordered pairs within each row; WCD = co-occurrence count.
+if (is.data.frame(dat) && ncol(dat) == 1) {
+  v <- as.character(dat[[1]])
+  has_semicolon <- any(grepl(";", v, fixed = TRUE), na.rm = TRUE)
+  if (isTRUE(has_semicolon)) {
+    make_pairs <- function(s) {
+      s <- trimws(as.character(s))
+      if (!isTRUE(nzchar(s))) return(NULL)
+      parts <- trimws(strsplit(s, ";", fixed = TRUE)[[1]])
+      parts <- parts[nzchar(parts)]
+      if (length(parts) < 2) return(NULL)
+      cmb <- t(combn(parts, 2))
+      data.frame(Leader = cmb[,1], follower = cmb[,2], WCD = 1, stringsAsFactors = FALSE)
+    }
+    L <- lapply(v, make_pairs)
+    L <- L[!vapply(L, is.null, logical(1))]
+    if (length(L)) {
+      edges <- do.call(rbind, L)
+      # aggregate duplicate pairs across rows
+      edges$Leader   <- trimws(as.character(edges$Leader))
+      edges$follower <- trimws(as.character(edges$follower))
+      edges <- edges[edges$Leader != "" & edges$follower != "", , drop = FALSE]
+      if (nrow(edges)) {
+        edges$key <- ifelse(edges$Leader <= edges$follower,
+                            paste(edges$Leader, edges$follower, sep="||"),
+                            paste(edges$follower, edges$Leader, sep="||"))
+        agg <- aggregate(WCD ~ key, data = edges, FUN = sum)
+        spl <- strsplit(as.character(agg$key), "\\|\\|", fixed = FALSE)
+        Leader <- vapply(spl, function(x) x[1], character(1))
+        follower <- vapply(spl, function(x) x[2], character(1))
+        dat <- data.frame(Leader = Leader, follower = follower, WCD = agg$WCD, stringsAsFactors = FALSE)
+      }
+    }
+  }
+}
+# ---- WoS 2-column ';' authors -> (Leader=1st author, follower=corresponding author) ----
+        # Rule (as requested):
+        # - Column 1: authors list separated by ';' -> take first author, then take "Last, IN" (first two tokens)
+        # - Column 2: corresponding author line -> take the FIRST "Last, IN" match (e.g., "Kan, WC")
+        if (is.data.frame(dat) && ncol(dat) == 2) {
+          col1 <- as.character(dat[[1]])
+          col2 <- as.character(dat[[2]])
+          is_wos_like <- any(grepl(";", col1, fixed = TRUE), na.rm = TRUE) &&
+            any(grepl("correspond", col2, ignore.case = TRUE), na.rm = TRUE)
+          if (isTRUE(is_wos_like)) {
+            # first author segment before first ';'
+            first_seg <- trimws(sub(";.*$", "", col1))
+            # extract "Last, IN" pattern from first segment / corresponding line
+            extract_last_ini <- function(x) {
+              x <- trimws(as.character(x))
+              m <- regmatches(x, regexpr("^\\s*[^,;]+,\\s*[^\\s,;]+", x, perl = TRUE))
+              if (length(m) == 0) "" else trimws(m[1])
+            }
+            Leader   <- vapply(first_seg, extract_last_ini, character(1))
+            follower <- vapply(col2,     extract_last_ini, character(1))
+            dat <- data.frame(Leader = Leader, follower = follower, WCD = 1, stringsAsFactors = FALSE)
           }
         }
-        if (!is.null(input$file) && !is.na(input$file$datapath) && nzchar(input$file$datapath)) {
-          dat <- smart_prepare_uploaded_data(read_any_table(input$file$datapath), input$file$datapath)
-        } else if (nzchar(pubmed_url_now)) {
-          pub_df <- fetch_pubmed_summary_df(pubmed_url_now)
-          dat <- smart_prepare_uploaded_data(pub_df, "pubmedsummary_from_url.txt")
-          rv$pubmed_summary_path <- save_pubmed_summary_text(pub_df)
-        } else if (!is.null(remote_csv_now) && nzchar(remote_csv_now) && file.exists(remote_csv_now)) {
-          dat <- smart_prepare_uploaded_data(read_any_table(remote_csv_now), remote_csv_now)
-        } else if (isTRUE(input$use_demo)) {
-          demo_path <- file.path(app_dir, "demo", "demo_edges.csv")
-          if (!file.exists(demo_path)) stop("Demo data not found: ", demo_path)
-          dat <- smart_prepare_uploaded_data(read_any_table(demo_path), demo_path)
-        } else {
-          stop("No data uploaded. Please upload a file, paste a PubMed hyperlink, provide ?csv_url=..., or select 'Use demo'.")
-        }
-        # ---- Minimal numeric coercion (ensure third column is numeric or default to 1) ----
+
+# ---- Minimal numeric coercion (ensure WCD is numeric; NEVER assign dat[[3]] when input has <3 cols) ----
         if (ncol(dat) >= 3) {
           dat[[3]] <- suppressWarnings(as.numeric(dat[[3]]))
           dat[[3]][!is.finite(dat[[3]])] <- 1
+        } else if (ncol(dat) == 2) {
+          # keep 2-col inputs as edge list with implicit weight 1
+          if (is.null(names(dat)) || any(is.na(names(dat)) | !nzchar(names(dat)))) {
+            names(dat) <- c("Leader","follower")
+          } else {
+            names(dat)[1:2] <- c("Leader","follower")
+          }
+          dat[["WCD"]] <- 1
         } else {
-          dat[[3]] <- 1
+          # ncol(dat) == 1 should be handled by the 1-col ';' co-word splitter BEFORE this block.
+          # Leave as-is to avoid tibble assignment error.
         }
         incProgress(0.2, detail = "Normalizing network")
         net <- normalize_network(dat)
+        if (!is.list(net)) stop("normalize_network() returned non-list; check input data format.")
         n_pre_flca <- if (!is.null(net$nodes_base)) nrow(net$nodes_base) else 0
         # ---- Safety: force net$edges_full$WCD numeric ----
         if (!is.null(net$edges_full) && ("WCD" %in% names(net$edges_full))) {
@@ -644,8 +804,7 @@ server <- function(input, output, session) {
         # render PNGs
         incProgress(0.9, detail = "Rendering PNG plots")
         render_network_png(fig_paths$network, nodes20, edges_one20)
-     
-        render_ssplot_png(fig_paths$ssplot, nodes20, net$edges_full)  # uses render_panel with sil_df adapter
+        render_ssplot_png(fig_paths$ssplot, nodes20, net$edges_full, n_doc = rv$n_doc)  # uses render_panel with sil_df adapter
         render_kano_png(fig_paths$kano1, nodes20, edges_one20,
                         xcol = "value2", ycol = "value",
                         title = "Kano1: value2 (x) vs value (y)",
@@ -703,6 +862,28 @@ rv$sankey_code         <- safe1(sank$code)
           quiet = TRUE,
           envir = report_env
         )
+
+        # --- Inject owner title into the rendered HTML (from URL title/author/owner) ---
+        owner_ttl <- trimws(as.character(rv$owner_title %||% ""))
+        if (isTRUE(nzchar(owner_ttl)) && file.exists(out_html)) {
+          html_lines <- tryCatch(readLines(out_html, warn = FALSE, encoding = "UTF-8"), error = function(e) character())
+          if (length(html_lines)) {
+            badge <- paste0(
+              "<div style='color:#c00000;font-weight:700;font-size:28px;line-height:1.2;margin:10px 0 14px 0;'>",
+              htmltools::htmlEscape(owner_ttl),
+              "</div>"
+            )
+            # Insert right after <body> if possible; otherwise prepend
+            body_idx <- which(grepl("<body[^>]*>", html_lines, ignore.case = TRUE))[1]
+            if (!is.na(body_idx)) {
+              html_lines <- append(html_lines, badge, after = body_idx)
+            } else {
+              html_lines <- c(badge, html_lines)
+            }
+            tryCatch(writeLines(html_lines, out_html, useBytes = TRUE), error = function(e) NULL)
+          }
+        }
+
         # unique resource prefix to avoid addResourcePath collisions
         prefix <- paste0("report_", as.integer(Sys.time()), "_", sample.int(1e9,1))
         addResourcePath(prefix, out_dir)
@@ -802,9 +983,7 @@ output$sankey_plot <- renderPlot({
   if (!"name"  %in% names(nodes_df)) nodes_df$name  <- as.character(nodes_df$name)
   nodes_df$name <- as.character(nodes_df$name)
   if (!"carac" %in% names(nodes_df)) nodes_df$carac <- NA_integer_
-  if (!"value" %in% names(nodes_df)) nodes_df$value <- 1
-
-  # 節點全集：所有出現在節點表或邊上的名字
+  if (!"value" %in% names(nodes_df)) nodes_df$value <- rep(1, nrow(nodes_df))# 節點全集：所有出現在節點表或邊上的名字
   node_names <- unique(c(
     as.character(nodes_df$name),
     as.character(edges_no_self$Leader),
@@ -876,66 +1055,10 @@ output$sankey_plot <- renderPlot({
     main = "Sankey-style flow (size = value, color = cluster, width = WCD)"
   )
 })
-output$dl_demo_data <- downloadHandler(
-  filename = function() paste0("demo_dataset_", Sys.Date(), ".csv"),
-  content = function(file) {
-    demo_path <- file.path(app_dir, "demo", "demo_edges.csv")
-    if (!file.exists(demo_path)) stop("Demo data not found: ", demo_path)
-    file.copy(demo_path, file, overwrite = TRUE)
-  }
-)
-
-output$dl_demo_example <- downloadHandler(
-  filename = function() "demo_edges.csv",
-  content = function(file) {
-    src <- file.path(app_dir, "demo", "demo_edges.csv")
-    if (!file.exists(src)) src <- file.path(app_dir, "demo_edges.csv")
-    if (!file.exists(src)) stop("demo_edges.csv not found.")
-    file.copy(src, file, overwrite = TRUE)
-  }
-)
-
-output$dl_pubmedsummary_example <- downloadHandler(
-  filename = function() "pubmedsummary.txt",
-  content = function(file) {
-    src <- file.path(app_dir, "demo", "pubmedsummary.txt")
-    if (!file.exists(src)) src <- file.path(app_dir, "pubmedsummary.txt")
-    if (!file.exists(src)) stop("pubmedsummary.txt not found.")
-    file.copy(src, file, overwrite = TRUE)
-  }
-)
-
-output$dl_reference_example <- downloadHandler(
-  filename = function() "reference.csv",
-  content = function(file) {
-    src <- file.path(app_dir, "demo", "reference.csv")
-    if (!file.exists(src)) src <- file.path(app_dir, "reference.csv")
-    if (!file.exists(src)) stop("reference.csv not found.")
-    file.copy(src, file, overwrite = TRUE)
-  }
-)
-
-output$dl_wos_example <- downloadHandler(
-  filename = function() "wosauthor.csv",
-  content = function(file) {
-    src <- file.path(app_dir, "demo", "wosauthor.csv")
-    if (!file.exists(src)) src <- file.path(app_dir, "wosauthor.csv")
-    if (!file.exists(src)) stop("wosauthor.csv not found.")
-    file.copy(src, file, overwrite = TRUE)
-  }
-)
-
 output$dl_top20_nodes <- downloadHandler(
-  filename = function() paste0("top20_nodes_", Sys.Date(), ".csv"),
-  content = function(file) {
-    dat <- rv$top20_nodes
-    if (is.null(dat)) stop("No Top20 nodes; please run analysis first.")
-    readr::write_csv(dat, file)
-  }
-)
-
-output$dl_top20_edges <- downloadHandler(
-  filename = function() paste0("top20_relations_", Sys.Date(), ".csv"),
+  filename = function() {
+    paste0("top20_relations_", Sys.Date(), ".csv")
+  },
   content = function(file) {
     dat <- rv$top20_edges
     if (is.null(dat)) stop("No Top20 relations; please run analysis first.")
@@ -943,58 +1066,24 @@ output$dl_top20_edges <- downloadHandler(
   }
 )
 
-# --- Figure downloads ---
-.output_copy_png <- function(src, file) {
-  if (is.null(src) || !nzchar(src) || !file.exists(src)) stop("Figure not available yet; please run analysis first.")
-  file.copy(src, file, overwrite = TRUE)
-}
-
-output$dl_fig_network <- downloadHandler(
-  filename = function() paste0("network_top20_", Sys.Date(), ".png"),
-  content  = function(file) .output_copy_png(rv$fig_paths$network, file)
-)
-output$dl_fig_ssplot <- downloadHandler(
-  filename = function() paste0("ssplot_top20_", Sys.Date(), ".png"),
-  content  = function(file) .output_copy_png(rv$fig_paths$ssplot, file)
-)
-output$dl_fig_kano1 <- downloadHandler(
-  filename = function() paste0("kano1_", Sys.Date(), ".png"),
-  content  = function(file) .output_copy_png(rv$fig_paths$kano1, file)
-)
-output$dl_fig_kano2 <- downloadHandler(
-  filename = function() paste0("kano2_", Sys.Date(), ".png"),
-  content  = function(file) .output_copy_png(rv$fig_paths$kano2, file)
-)
-output$dl_fig_pca <- downloadHandler(
-  filename = function() paste0("pca_", Sys.Date(), ".png"),
-  content  = function(file) .output_copy_png(rv$fig_paths$pca, file)
-)
-
-output$dl_all_figs <- downloadHandler(
-  filename = function() paste0("figures_", Sys.Date(), ".zip"),
-  content = function(file) {
-    req(rv$fig_paths)
-    files <- unlist(rv$fig_paths, use.names = FALSE)
-    files <- files[file.exists(files)]
-    if (!length(files)) stop("No figures found; please run analysis first.")
-    # zip: keep filenames only
-    old <- setwd(dirname(files[[1]]))
-    on.exit(setwd(old), add = TRUE)
-    utils::zip(zipfile = file, files = basename(files))
-  }
-)
 
 
-  output$report_iframe <- renderUI({
-    req(rv$report_path, rv$report_prefix)
-    tags$iframe(
+  
+  observeEvent(rv$report_path, {
+    req(!is.null(rv$report_path))
+    tryCatch(updateTabsetPanel(session, "tabs", selected = "Report"), error = function(e) NULL)
+  }, ignoreInit = TRUE)
+
+output$report_iframe <- renderUI({
+    req(!is.null(rv$report_path) && isTRUE(nzchar(rv$report_path)))
+tags$iframe(
       src = paste0(rv$report_prefix, "/", basename(rv$report_path), "?v=", as.integer(Sys.time())),
       style = "width: 100%; height: 900px; border: 1px solid #ccc;"
     )
   })
   output$report_link <- renderUI({
-    req(rv$report_path, rv$report_prefix)
-    tags$a("Open report in new tab", href = paste0(rv$report_prefix, "/", basename(rv$report_path), "?v=", as.integer(Sys.time())), target = "_blank")
+    req(!is.null(rv$report_path) && isTRUE(nzchar(rv$report_path)))
+tags$a("Open report in new tab", href = paste0(rv$report_prefix, "/", basename(rv$report_path), "?v=", as.integer(Sys.time())), target = "_blank")
   })
   output$dl_report <- downloadHandler(
     filename = function() { "report.html" },
@@ -1003,5 +1092,10 @@ output$dl_all_figs <- downloadHandler(
       file.copy(rv$report_path, file, overwrite = TRUE)
     }
   )
+  # Owner title (URL title=... wins; otherwise keep current)
+  observe({
+    ttl <- trimws(as.character(rv$title_param %||% ""))
+    if (isTRUE(nzchar(ttl))) rv$owner_title <- ttl
+  })
 }
 shinyApp(ui, server)
