@@ -708,41 +708,41 @@ render_kano_png <- function(out_png, nodes, data, xcol = "value2", ycol = "value
     y = mean_y + spread_y * (1 - t)^2
   )
 
-  diag_line <- data.frame(
-    x = seq(mean_x - 3 * expand_x, mean_x + 3 * expand_x, length.out = 300),
-    y = seq(mean_y - 3 * expand_y, mean_y + 3 * expand_y, length.out = 300)
-  )
-  slope_63_5 <- tan(43.5 * pi / 180)
-  diag_line_63_5 <- data.frame(
-    x = seq(mean_x - 5 * expand_x, mean_x + 5 * expand_x, length.out = 300)
-  )
-  diag_line_63_5$y <- slope_63_5 * (diag_line_63_5$x - mean_x) + mean_y
-
   visual_ratio <- if (identical(xcol, "value2") && identical(ycol, "value")) 0.32 else (1 / 1.5)
-  circle_data <- NULL
-  if (isTRUE(add_circle)) {
-    x_lower <- function(tt) ( tt * spread_x - spread_x/2 + mean_x )
-    y_lower <- function(tt) ( mean_y - spread_y * (1 - tt)^2 )
-    x_upper <- function(tt) ( -tt * spread_x + spread_x/2 + mean_x )
-    y_upper <- function(tt) ( mean_y + spread_y * (1 - tt)^2 )
+  wing_poly <- rbind(upper_curve, lower_curve[rev(seq_len(nrow(lower_curve))), ])
 
-    dist2_lower <- function(tt){
-      dx2 <- x_lower(tt) - mean_x
-      dy2 <- (y_lower(tt) - mean_y) * visual_ratio
-      dx2*dx2 + dy2*dy2
-    }
-    dist2_upper <- function(tt){
-      dx2 <- x_upper(tt) - mean_x
-      dy2 <- (y_upper(tt) - mean_y) * visual_ratio
-      dx2*dx2 + dy2*dy2
-    }
-    min_lower <- optimize(dist2_lower, interval = c(0, 1))$objective
-    min_upper <- optimize(dist2_upper, interval = c(0, 1))$objective
-    circle_radius <- (min(min_lower, min_upper) ** 0.5) * 0.999
-    theta <- seq(0, 2*3.141592653589793, length.out = 800)
+  circle_data <- NULL
+  hub_circle <- NULL
+  hub_circle2 <- NULL
+  if (isTRUE(add_circle)) {
+    wing_dense <- rbind(lower_curve, upper_curve)
+    dxv <- wing_dense$x - mean_x
+    dyv <- (wing_dense$y - mean_y) * visual_ratio
+    wing_outer_radius <- suppressWarnings(max(sqrt(dxv^2 + dyv^2), na.rm = TRUE))
+    if (!is.finite(wing_outer_radius) || wing_outer_radius <= 0) wing_outer_radius <- max(dx, dy)
+
+    theta <- seq(0, 2 * pi, length.out = 600)
+    circle_radius <- wing_outer_radius * 0.55
     circle_data <- data.frame(
       x = mean_x + circle_radius * cos(theta),
       y = mean_y + (circle_radius * sin(theta)) / visual_ratio
+    )
+
+    gap_half_y <- spread_y * 0.25
+    hub_r <- gap_half_y * visual_ratio * 0.97
+    hub_r <- max(hub_r, wing_outer_radius * 0.04)
+    hub_r <- min(hub_r, wing_outer_radius * 0.35)
+
+    theta_h <- seq(0, 2 * pi, length.out = 360)
+    hub_circle <- data.frame(
+      x = mean_x + hub_r * cos(theta_h),
+      y = mean_y + (hub_r * sin(theta_h)) / (visual_ratio * 1.25)
+    )
+
+    hub_r2 <- min(hub_r * 2, wing_outer_radius * 0.95)
+    hub_circle2 <- data.frame(
+      x = mean_x + hub_r2 * cos(theta_h),
+      y = mean_y + (hub_r2 * sin(theta_h)) / (visual_ratio * 1.25)
     )
   }
 
@@ -759,6 +759,12 @@ render_kano_png <- function(out_png, nodes, data, xcol = "value2", ycol = "value
       aes(x = x, y = y, xend = xend, yend = yend),
       color = "gray60", linewidth = 0.8, alpha = 0.7
     ) +
+    geom_vline(xintercept = 0, color = "red", linetype = "dotted", linewidth = 0.9, alpha = 0.85) +
+    geom_hline(yintercept = 0, color = "red", linetype = "dotted", linewidth = 0.9, alpha = 0.85) +
+    geom_polygon(data = wing_poly, aes(x = x, y = y), inherit.aes = FALSE,
+                 fill = "lightskyblue1", alpha = 0.18, color = NA) +
+    geom_line(data = lower_curve, aes(x = x, y = y), color = "blue", linewidth = 2.3) +
+    geom_line(data = upper_curve, aes(x = x, y = y), color = "blue", linewidth = 2.3) +
     geom_point(aes(size = size_plot, fill = color), color = "black", shape = 21, alpha = 0.9) +
     geom_text_repel(
       aes(label = name),
@@ -773,23 +779,24 @@ render_kano_png <- function(out_png, nodes, data, xcol = "value2", ycol = "value
       seed = 123
     ) +
     scale_fill_identity() +
-    scale_size(range = c(3, 12)) +
-    geom_vline(xintercept = mean_x, linetype = "dashed", color = "red") +
-    geom_hline(yintercept = mean_y, linetype = "dashed", color = "red") +
-    geom_line(data = lower_curve, aes(x = x, y = y), color = "blue", linewidth = 2) +
-    geom_line(data = upper_curve, aes(x = x, y = y), color = "blue", linewidth = 2) +
-    geom_line(data = diag_line,  aes(x = x, y = y), color = "gray70", linetype = "dotted") +
-    geom_line(data = diag_line_63_5, aes(x = x, y = y), color = "gray70", linetype = "dashed")
+    scale_size(range = c(3, 12))
 
+  if (!is.null(hub_circle)) {
+    p_kano <- p_kano +
+      geom_polygon(data = hub_circle, aes(x = x, y = y), inherit.aes = FALSE, fill = "white", color = NA) +
+      geom_path(data = hub_circle, aes(x = x, y = y), inherit.aes = FALSE, color = "purple", linewidth = 0.2)
+  }
+  if (!is.null(hub_circle2)) {
+    p_kano <- p_kano + geom_path(data = hub_circle2, aes(x = x, y = y), inherit.aes = FALSE, color = "hotpink3", linewidth = 0.2)
+  }
   if (!is.null(circle_data)) {
-    p_kano <- p_kano + geom_path(data = circle_data, aes(x = x, y = y), color = "purple", linewidth = 1.1)
+    p_kano <- p_kano + geom_path(data = circle_data, aes(x = x, y = y), inherit.aes = FALSE, color = "hotpink3", linewidth = 0.2)
   }
 
   p_kano <- p_kano +
     coord_fixed(ratio = visual_ratio, clip = "off") +
     scale_x_continuous(limits = c(min_x - 3 * expand_x, max_x + 3 * expand_x)) +
-    scale_y_continuous(limits = c(min_y - 8 * expand_y, max_y + 22 * expand_y),
-                     expand = ggplot2::expansion(mult = c(0.02, 0.06))) +
+    scale_y_continuous(limits = c(min_y - 3 * expand_y, max_y + 3 * expand_y)) +
     labs(title = title, x = xlab, y = ylab, size = "Dominance") +
     theme_minimal(base_family = "Microsoft JhengHei") +
     theme(plot.title = element_text(size = 16, face = "bold", hjust = 0.5), legend.position = "none")
